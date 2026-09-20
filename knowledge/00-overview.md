@@ -1,6 +1,6 @@
 # vLLM 知识库总览
 
-> 基于 vLLM main（`f32b17b6d6`，2026-08-21），最新 release tag **v0.28.0rc1**（`cd6ae1e0a0`，2026-08-20）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
+> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
 
 ## 1. vLLM 是什么
 <!-- tags: intro, overview, 简介 -->
@@ -14,6 +14,7 @@ vLLM 是一个高性能 LLM 推理与服务引擎，核心贡献是 **PagedAtten
 3. **KV cache = block pool + 自动前缀缓存（APC）**：`BlockPool` 物理块池 + 链式块哈希，LRU 驱逐；抢占只有 **recompute**（无 v0 的 CPU swap）。
 4. **async scheduling**：调度与执行重叠（`max_concurrent_batches=2`），默认按 executor 能力自动开启。
 5. **编译与 CUDA Graph 深度集成**：`torch.compile`（`VLLM_COMPILE` 模式，piecewise 切图 + 自定义 Inductor pass）+ CUDA Graph（默认 `FULL_AND_PIECEWISE`：decode 整图 replay，prefill/mixed 走 piecewise）。
+6. **Model Runner V2（v0.29 起默认）**：GPU 执行层重构为 `vllm/v1/worker/gpu/` 下的模块化 runner（`use_v2_model_runner` 默认 True），旧版 `gpu_model_runner.py` 降为 legacy 回退（`VLLM_USE_V2_MODEL_RUNNER=0`）。HiSparse、watermarking 等新特性强制要求 V2。
 
 ## 2. 架构地图
 <!-- tags: architecture, map, 架构, dataflow, 数据流 -->
@@ -55,7 +56,7 @@ flowchart TB
 要点：
 
 - **前端可选 Rust 实现（v0.28 新增，实验性）**：`rust/` 的 `vllm-frontend-rs` 用 axum 重建北向 OpenAI 兼容 HTTP 层，仍经 ZMQ + MessagePack 走既有 engine 边界，`VLLM_USE_RUST_FRONTEND=1` 启用（默认 `0`，生产仍用 Python 前端）。
-- **`EngineCore.step()`**（`vllm/v1/engine/core.py:583`）是引擎内环：`scheduler.schedule()` → `executor.execute_model(non_block=True)` → `get_grammar_bitmask()` → `executor.sample_tokens()` → `scheduler.update_from_output()`。
+- **`EngineCore.step()`**（`vllm/v1/engine/core.py:634`）是引擎内环：`scheduler.schedule()` → `executor.execute_model(non_block=True)` → `get_grammar_bitmask()` → `executor.sample_tokens()` → `scheduler.update_from_output()`。
 - **`execute_model` 与 `sample_tokens` 分离**，让 forward 的 GPU kernel 入队后 CPU 可继续准备下一步（async scheduling 的基础）。
 - 同步离线路径（`LLM.generate`）走 `SyncMPClient` + 用户循环 `step()`；在线路径（`AsyncLLM`）走 `AsyncMPClient` + 后台 `output_handler` 协程流式 yield。
 - 进程拓扑：主进程（launcher）→ N 个 API server 子进程 + DP 个 EngineCore 进程 → 每个 EngineCore 经 `MultiprocExecutor`/`RayDistributedExecutor` 拉起 TP×PP 个 Worker 进程。
@@ -75,7 +76,7 @@ flowchart TB
 │ 量化层  FP8 / AWQ / GPTQ / ModelOpt(NVFP4) / MXFP4 / 在线量化 …  │
 │   QuantizationConfig → QuantizeMethod → kernel 选择器 (scaled_mm)│
 ├──────────────────────────────────────────────────────────────────┤
-│ 模型层  model_executor: 290+ 模型 + 并行算子                      │
+│ 模型层  model_executor: 380+ 模型架构 + 并行算子                  │
 │   (ColumnParallelLinear / RowParallelLinear / FusedMoE / RMSNorm)│
 ├──────────────────────────────────────────────────────────────────┤
 │ 执行层  torch.compile (VLLM_COMPILE, piecewise + 自定义 pass)     │
@@ -86,7 +87,7 @@ flowchart TB
 ### 2.3 配置体系
 <!-- tags: vllmconfig, config, 配置, engineargs, 解析链 -->
 
-所有配置聚合在 `VllmConfig`（`vllm/config/vllm.py:357`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `attention_config` / `speculative_config` / `kv_transfer_config` / `quant_config` / `lora_config` / `observability_config` …。解析链：**CLI flag → `EngineArgs`（`vllm/engine/arg_utils.py:424`，字段名与 flag 一一对应）→ `create_engine_config()` 逐个子 config → `VllmConfig.__post_init__` 跨 config 推导**（如按 executor 能力定 `async_scheduling`）。环境变量集中在 `vllm/envs.py`。
+所有配置聚合在 `VllmConfig`（`vllm/config/vllm.py:354`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `attention_config` / `speculative_config` / `kv_transfer_config` / `quant_config` / `lora_config` / `observability_config` …。解析链：**CLI flag → `EngineArgs`（`vllm/engine/arg_utils.py:446`，字段名与 flag 一一对应）→ `create_engine_config()` 逐个子 config → `VllmConfig.__post_init__` 跨 config 推导**（如按 executor 能力定 `async_scheduling`）。环境变量集中在 `vllm/envs.py`。
 
 ## 3. 子系统导读
 <!-- tags: index, navigation, 导读 -->
@@ -186,7 +187,7 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
 | `vllm/v1/engine/async_llm.py` / `llm_engine.py` | 在线 `AsyncLLM` / 同步 `LLMEngine` 前端 |
 | `vllm/v1/core/sched/scheduler.py` | `Scheduler`：调度、抢占、KV 集成 |
 | `vllm/v1/core/kv_cache_manager.py` / `block_pool.py` | KV cache 块管理与前缀缓存 |
-| `vllm/v1/worker/gpu_model_runner.py` / `gpu_worker.py` | ModelRunner 主逻辑 / Worker 初始化与显存 profiling |
+| `vllm/v1/worker/gpu/model_runner.py`（V2，默认）/ `gpu_model_runner.py`（V1 legacy）/ `gpu_worker.py` | ModelRunner 主逻辑 / Worker 初始化与显存 profiling |
 | `vllm/v1/executor/multiproc_executor.py` | 默认多进程 worker 编排 |
 | `vllm/v1/attention/` | attention backend 抽象、选择器与实现 |
 | `vllm/compilation/` | torch.compile 集成、CUDA Graph |
@@ -198,3 +199,30 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
 | `rust/`（`vllm-frontend-rs`） | Rust 前端（实验性，v0.28+）：axum HTTP + ZMQ engine client |
 | `vllm/envs.py` | 全部 `VLLM_*` 环境变量注册表 |
 | `docker/Dockerfile` | 官方镜像（`vllm-openai` 等 target） |
+
+## 7. 增量更新记录
+<!-- tags: changelog, 增量更新, baseline, 基线 -->
+
+- **2026-09-12**：基线从 `f32b17b6d6`（2026-08-21，v0.28.0rc1）推进到 `2f59050eda`（2026-09-12，最新 tag **v0.29.0**，`98dff2a81d`）。区间 985 commits。主要变更：
+  - **Model Runner V2 成为默认**（`use_v2_model_runner` 默认 True，`vllm/v1/worker/gpu/` 模块化 runner；旧 `gpu_model_runner.py` 降为 legacy 回退）。详见 03 §1。
+  - **KV cache 物理布局重构**（RFC #42082）：新增 `vllm/v1/kv_cache_layout.py` 的 `KVCacheLayout` 枚举（`LBNHC/LBHNC/LHBNC/BLHNC/BLNHC/BHLNC` + 兼容 `NHD/HND`），`VLLM_KV_CACHE_LAYOUT` 扩展为 7 种取值。详见 02 §5。
+  - **HiSparse**（host-resident sparse-MLA decode 热缓冲，`vllm/v1/hisparse/`，强制 V2）+ **Engram/PLE**（n-gram 嵌入存储与分片，`vllm/config/engram.py` + ETP 进程组）。详见 02/05。
+  - **文本水印 watermarking**（`vllm/v1/watermarking/`，Gumbel-max + Philox PRF，`--watermark-config`，强制 V2）。详见 07。
+  - **调度器队列上限**：`SchedulerConfig.max_num_queued_reqs` / `max_num_queued_tokens`（`--max-num-queued-reqs`/`--max-num-queued-tokens`）。详见 02。
+  - **投机解码**：新增 `dflash2`、`gemma4_mtp`、`qwen4_exp_mtp`/`hy_v4_mtp`/`glm5_next_mtp` 等 MTP 变体；MTP 模型类型扩到 27 种。详见 07。
+  - **Attention**：新增 `B12X`（SM12x paged causal）、`FLASHINFER_MLA_SPARSE_SM90` 等 backend；MLA sparse/indexer 大幅扩展。详见 04。
+  - **分布式**：`weight_transfer/` 新增 `sharded_rdt`（分片 RDMA 权重传输）引擎；`parallel_state` 新增 ETP 组与 `suspend/resume_device_comms`。详见 05。
+  - **部署**：新增 scale-out 端点（`/v1/chat/completions/render`、`/inference/v1/generate` 等，`VLLM_ENABLE_SCALE_OUT_ENDPOINTS`）。详见 08。
+  - 模型架构数从 290+ 增至 **380+**（新增 DeepSeek-V4/V4.1、GLM-5.3-Flash、Qwen4-Exp、Kimi-K3 等）。
+- **2026-09-19**：基线从 `2f59050eda`（2026-09-12，v0.29.0）推进到 `751f6807d9`（2026-09-19，最新 tag **v0.30.0rc2**，`fa6ff06066`，release candidate）。区间 419 commits。主要变更：
+  - **水印支持投机解码**：新增 `dual_key_gumbel` 算法（双 key gumbel-max，`supports_speculative_decoding=True`，`alpha` 控制 key-B 概率，加权 early-fusion 检测 `vllm/v1/watermarking/gumbel.py:208`）；`spec_decode.py` 新增 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker` 与 `allow_target_only_watermarking`；`_check_watermarking_unsupported`（`vllm/config/vllm.py:1162`）约束 `draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {dspark,eagle,eagle3,mtp}。详见 07 §7.1。
+  - **调度器 RUNNING 准入上限**：`SchedulerConfig.max_num_active_seqs`（`--max-num-active-seqs`，`vllm/config/scheduler.py:70`，`vllm/v1/core/sched/scheduler.py:129`，执行点 `vllm/v1/core/sched/scheduler.py:872-874`）；队列上限计数改用 `SharedAdmissionStats`（`vllm/v1/engine/admission_control.py:13`）跨进程无锁计数。详见 02 §2.2。
+  - **投机解码自适应验证**：`enable_adaptive_verification`（`vllm/config/speculative.py:539`）+ `OnlineAcceptanceEstimator`（`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py:313`，501 行，log-odds 线性模型，Triton accumulate/refit/predict kernels）。详见 07 §1.3。
+  - **KV offload 增强**：back-pressure（#50045，`vllm/v1/kv_offload/tiering/backpressure.py`）、KVCR（#53624，`vllm/v1/kv_offload/tiering/kvcr/`）、per-request `max_load_tokens`（#55885，`vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:367`）、chunked region 注册（#51081）、cgroup 检查（#54014）、MLA compact（#56799）。详见 02 §6.1。
+  - **Model Runner V2**：DBO FULL CUDA graph（#51700，`vllm/v1/worker/gpu/model_runner.py:1750`）；Fast Start 支持 nnode>1（#55468）。详见 03。
+  - **分布式**：MoonEP BF16 all2all backend（#52101，`vllm/model_executor/layers/fused_moe/prepare_finalize/moonep.py`）；DeepEPv2 async finalize（#52781/#57236）；PCP+DCP on sparse-MLA（#56157）；PCP decode-only FULL CUDA graphs（#53867）；NIXL attention-HMA PP push prefill（#50494）；Elastic EP CUDA graph 复用（#54985）。详见 05。
+  - **Attention**：新增 `COMPOSITE` backend（`vllm/v1/attention/backends/composite.py`，Triton/FlashInfer 或 Triton/FlashAttention 组合，用于 multimodal prefix attention `mm_prefix`，selector 在 `use_mm_prefix=True` 时自动选择）。详见 04 §4.1。
+  - **量化**：Quark 原生 W4A16 INT4/UINT4（#48606，`vllm/model_executor/layers/quantization/quark/schemes/quark_w4a16_int4.py`）；CPU FP8 W8A8 linear/MoE（#49942，`csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp` + `moe_fp8_w8a8.cpp`）。详见 06。
+  - **部署**：新增 `POST /release_kv_cache_memory` 端点（#44890，`vllm/entrypoints/serve/dev/sleep/api_router.py:31`）；`--enable-scale-out` CLI flag 取代 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（#55176，`vllm/entrypoints/scale_out/factories.py:72`）。详见 08。
+  - **结构化输出重构**：`should_fill_bitmask`/`should_advance` 移除，改用 `_get_constraint_start`（`vllm/v1/structured_output/__init__.py:220`）/`validate_tokens`（`vllm/v1/structured_output/__init__.py:294`）；调度器 grammar 验证迁移到 `structured_output_manager.validate_tokens`（`vllm/v1/core/sched/scheduler.py:2526`）。详见 07。
+  - **Engram**：新增 `embedding_across_dp`/`dp_shared_memory` 字段 + 异步预取 + DP 分片（#56512）。详见 07 §7.2。

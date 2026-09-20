@@ -1,6 +1,6 @@
 # 核心架构与请求生命周期
 
-> 基于 vLLM main（`f32b17b6d6`，2026-08-21）源码，最新 release tag **v0.28.0rc1**（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
+> 基于 vLLM main（`751f6807d9`，2026-09-19）源码，最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
 
 ## 1. v1 与旧版 (v0) 引擎
 <!-- tags: v1, engine, 引擎 -->
@@ -15,9 +15,9 @@ v1 是 vLLM 重写的引擎，当前版本中 **v0 引擎已完全移除**，`vl
 v1 相对 v0 的关键架构变化：
 
 1. **前后端进程解耦**：调度器 (Scheduler) 与模型执行 (Model Runner) 运行在独立的 **EngineCore 进程** 中，前端 (API server / LLM 客户端) 通过 **ZMQ** 与之通信。v0 是单进程内 `step()` 轮询。
-2. **连续批处理 (continuous batching) 原生内建**：不再有显式的 "prefill phase / decode phase"，调度器每步只关心让每个请求的 `num_computed_tokens` 追上 `num_tokens_with_spec`（见 `vllm/v1/core/sched/scheduler.py:484` 的注释）。
+2. **连续批处理 (continuous batching) 原生内建**：不再有显式的 "prefill phase / decode phase"，调度器每步只关心让每个请求的 `num_computed_tokens` 追上 `num_tokens_with_spec`（见 `vllm/v1/core/sched/scheduler.py:570` 的注释）。
 3. **KV cache 用 block pool + 前缀缓存**：`KVCacheManager` / `BlockPool`（`vllm/v1/core/`），请求级 `block_hashes` 支持 prefix caching。
-4. **异步调度 (async scheduling)**：`SchedulerConfig.async_scheduling`（默认在 `VllmConfig.__post_init__` 中按 executor 能力自动开启），让 GPU 前向与下一步调度重叠，`max_concurrent_batches` 因此为 2（`vllm/config/vllm.py:584`）。
+4. **异步调度 (async scheduling)**：`SchedulerConfig.async_scheduling`（默认在 `VllmConfig.__post_init__` 中按 executor 能力自动开启），让 GPU 前向与下一步调度重叠，`max_concurrent_batches` 因此为 2（`vllm/config/vllm.py:585`）。
 5. **`vllm/sequence.py` 已不再是请求载体**：v1 用 `vllm/v1/request.py` 的 `Request` 对象 + `EngineCoreRequest`/`EngineCoreOutput`（msgspec.Struct）作为进程间消息。`vllm/sequence.py` 现在只剩 `IntermediateTensors`（PP 中间张量容器）。
 
 ## 2. 进程与线程模型
@@ -42,27 +42,27 @@ v1 相对 v0 的关键架构变化：
 └──────────────────────┘         └────────────────────────────────┘
 ```
 
-- **API server 进程**：`vllm/entrypoints/launchers/api_server/entry.py` 的 `run_server` / `run_server_worker`。单进程模式直接 `uvloop.run(run_server(args))`；多进程模式 `run_multi_api_server` 用 `APIServerProcessManager`（`vllm/v1/utils.py:166`）spawn 子进程，共享一个 `reuse_port` socket。每个 API server 进程内持有一个 `AsyncLLM` 前端实例。
+- **API server 进程**：`vllm/entrypoints/launchers/api_server/entry.py` 的 `run_server` / `run_server_worker`。单进程模式直接 `uvloop.run(run_server(args))`；多进程模式 `run_multi_api_server` 用 `APIServerProcessManager`（`vllm/v1/utils.py:167`）spawn 子进程，共享一个 `reuse_port` socket。每个 API server 进程内持有一个 `AsyncLLM` 前端实例。
 - **EngineCore 进程**：`vllm/v1/engine/core.py` 的 `EngineCoreProc`（继承 `EngineCore`）。每个 DP rank 一个。进程标题设为 `EngineCore` / `EngineCore_DP{rank}`（`set_process_title`）。
 - **Worker 进程**：由 `Executor` 拉起。`MultiprocExecutor`（`vllm/v1/executor/multiproc_executor.py:111`）为每个 TP×PP rank 起一个 `WorkerProc`，通过 `MessageQueue` 广播 `SchedulerOutput` 并回收 `ModelRunnerOutput`。
 
 ### EngineCore 内部线程
 <!-- tags: enginecore, threads, zmq, 线程, busy-loop -->
 
-`EngineCoreProc.__init__`（`core.py:1007`）在启动时创建两个 daemon 线程，把 ZMQ socket IO 与 GPU 前向解耦（socket 操作释放 GIL，可与模型前向重叠）：
+`EngineCoreProc.__init__`（`core.py:1088`）在启动时创建两个 daemon 线程，把 ZMQ socket IO 与 GPU 前向解耦（socket 操作释放 GIL，可与模型前向重叠）：
 
-- `process_input_sockets`（`core.py:1674`）：ZMQ `DEALER` 收 `EngineCoreRequest`，反序列化后 `preprocess_add_request` 转成 `Request`，压入 `input_queue`。
-- `process_output_sockets`（`core.py:1777`）：ZMQ `PUSH` 发 `EngineCoreOutputs`，复用发送 buffer 做零拷贝。
+- `process_input_sockets`（`core.py:1754`）：ZMQ `DEALER` 收 `EngineCoreRequest`，反序列化后 `preprocess_add_request` 转成 `Request`，压入 `input_queue`。
+- `process_output_sockets`（`core.py:1856`）：ZMQ `PUSH` 发 `EngineCoreOutputs`，复用发送 buffer 做零拷贝。
 
-主线程跑 `run_busy_loop`（`core.py:1391`）：`_process_input_queue` → `_process_engine_step`（调 `step_fn`）循环。
+主线程跑 `run_busy_loop`（`core.py:1470`）：`_process_input_queue` → `_process_engine_step`（调 `step_fn`）循环。
 
 ### ZMQ 通信细节
 <!-- tags: zmq, ipc, 通信, msgpack, handshake -->
 
-- 地址由 `get_engine_zmq_addresses`（`vllm/v1/engine/utils.py:1039`）分配：本地 (同机) 用 `ipc://`，跨节点用 `tcp://host:0`（bind 后回填真实端口）。
-- 消息类型 `EngineCoreRequestType`（`vllm/v1/engine/__init__.py:284`）：`ADD`/`ABORT`/`START_DP_WAVE`/`UTILITY`/`EXECUTOR_FAILED`/`WAKEUP`，用单字节 hex 编码。
+- 地址由 `get_engine_zmq_addresses`（`vllm/v1/engine/utils.py:1029`）分配：本地 (同机) 用 `ipc://`，跨节点用 `tcp://host:0`（bind 后回填真实端口）。
+- 消息类型 `EngineCoreRequestType`（`vllm/v1/engine/__init__.py:285`）：`ADD`/`ABORT`/`START_DP_WAVE`/`UTILITY`/`EXECUTOR_FAILED`/`WAKEUP`，用单字节 hex 编码。
 - 序列化用 `msgspec.msgpack`（`MsgpackEncoder`/`MsgpackDecoder`，`vllm/v1/serial_utils.py`），多模态张量可走 out-of-band tensor IPC（`tensor_ipc.py`）。
-- 启动握手：EngineCore 发 `HELLO`，前端回 `EngineHandshakeMetadata`（含 ZMQ 地址），EngineCore 再回 `EngineCoreReadyResponse`（`core.py:1632`，含 `num_gpu_blocks`、`block_size`、`max_model_len` 等）。客户端等待超时由 `VLLM_ENGINE_READY_TIMEOUT_S`（默认 600s）控制。
+- 启动握手：EngineCore 发 `HELLO`，前端回 `EngineHandshakeMetadata`（含 ZMQ 地址），EngineCore 再回 `EngineCoreReadyResponse`（`core.py:1710`，含 `num_gpu_blocks`、`block_size`、`max_model_len` 等）。客户端等待超时由 `VLLM_ENGINE_READY_TIMEOUT_S`（默认 600s）控制。
 
 ### Rust frontend（实验性，v0.27 起）
 <!-- tags: rust-frontend, axum, 实验性, crate, zmq -->
@@ -71,7 +71,7 @@ v1 相对 v0 的关键架构变化：
 
 - **crate 分层**（自底向上）：`vllm-engine-core-client`（ZMQ 传输 + msgpack 协议）→ `vllm-llm`（token-in/token-out facade）→ `vllm-text`（tokenizer + 增量 detokenizer）→ `vllm-chat`（chat 模板渲染、reasoning/tool 解析）→ `vllm-server`（axum OpenAI 兼容 HTTP API）→ `vllm-cmd`/`vllm-rs`（CLI 入口）。
 - **进程模型**：Python 仍是 launcher，负责进程启动，把 Rust API server 作为受管子进程拉起，继承监听 socket 并传入 ZMQ 地址（`vllm/entrypoints/cli/serve.py` 中 `rust_frontend_path` 分支）。
-- **启用方式**：`VLLM_USE_RUST_FRONTEND=1`（`vllm/envs.py:578` 的 `_resolve_rust_cli_path()` 据此解析二进制路径，结果存 `VLLM_RUST_FRONTEND_PATH`）；需 setuptools-rust 构建或显式指定路径。`vllm serve` 检测到 rust frontend 时走不同的多 API server 编排（`serve.py:108/125/145`）。
+- **启用方式**：`VLLM_USE_RUST_FRONTEND=1`（`vllm/envs.py:574` 的 `_resolve_rust_cli_path()` 据此解析二进制路径，结果存 `VLLM_RUST_FRONTEND_PATH`）；需 setuptools-rust 构建或显式指定路径。`vllm serve` 检测到 rust frontend 时走不同的多 API server 编排（`serve.py:112/128/148`）。
 - 另有 `VLLM_USE_RUST_BENCH`（Rust 版 bench 工具开关）。
 
 ## 3. 核心类：EngineCore / EngineCoreClient
@@ -82,13 +82,13 @@ v1 相对 v0 的关键架构变化：
 
 `vllm/v1/engine/core.py`
 
-- **`EngineCore`**（`core.py:104`）：引擎"内环"。`__init__` 里依次：建 `model_executor`（Executor）→ `_initialize_kv_caches`（profile 显存、算 KV cache 配置、`compile_or_warm_up_model`）→ 建 `Scheduler` → 建 `batch_queue`（PP/async 用）。
-  - `step()`（`core.py:583`）：`scheduler.schedule()` → `model_executor.execute_model(non_block=True)` → `scheduler.get_grammar_bitmask()` → `model_executor.sample_tokens()` → `scheduler.update_from_output()`。返回 `dict[client_index, EngineCoreOutputs]`。
-  - `step_with_batch_queue()`（`core.py:624`）：async scheduling / PP 下的流水线版本，用 `batch_queue` 让"调度下一批"与"取上一批结果"重叠。
-  - `preprocess_add_request`（`core.py:968`）：`EngineCoreRequest` → `Request`（在 input 线程里跑，可与 GPU 前向并行）。
-- **`EngineCoreProc`**（`core.py:1007`）：ZMQ 包装，后台进程版。`run_engine_core`（`core.py:1271`）是进程入口，注册 SIGTERM/SIGINT handler 后跑 `run_busy_loop`。
-- **`DPEngineCoreProc`**（`core.py:1986`）：MoE + DP 场景，额外维护 DP 进程组、wave 同步、dummy batch、Elastic EP 扩缩容。
-- **`DPMoEEngineCoreActor` / `EngineCoreActor`**（`core.py:2519/2542`）：Ray actor 版（`data_parallel_backend=ray` 时用）。
+- **`EngineCore`**（`core.py:109`）：引擎"内环"。`__init__` 里依次：建 `model_executor`（Executor）→ `_initialize_kv_caches`（profile 显存、算 KV cache 配置、`compile_or_warm_up_model`）→ 建 `Scheduler` → 建 `batch_queue`（PP/async 用）。
+  - `step()`（`core.py:634`）：`scheduler.schedule()` → `model_executor.execute_model(non_block=True)` → `scheduler.get_grammar_bitmask()` → `model_executor.sample_tokens()` → `scheduler.update_from_output()`。返回 `dict[client_index, EngineCoreOutputs]`。
+  - `step_with_batch_queue()`（`core.py:674`）：async scheduling / PP 下的流水线版本，用 `batch_queue` 让"调度下一批"与"取上一批结果"重叠。
+  - `preprocess_add_request`（`core.py:1049`）：`EngineCoreRequest` → `Request`（在 input 线程里跑，可与 GPU 前向并行）。
+- **`EngineCoreProc`**（`core.py:1088`）：ZMQ 包装，后台进程版。`run_engine_core`（`core.py:1351`）是进程入口，注册 SIGTERM/SIGINT handler 后跑 `run_busy_loop`。
+- **`DPEngineCoreProc`**（`core.py:2062`）：MoE + DP 场景，额外维护 DP 进程组、wave 同步、dummy batch、Elastic EP 扩缩容。
+- **`DPMoEEngineCoreActor` / `EngineCoreActor`**（`core.py:2585/2553`）：Ray actor 版（`data_parallel_backend=ray` 时用）。
 
 ### EngineCoreClient（前端侧）
 <!-- tags: enginecoreclient, client, 前端, syncmp, asyncmp -->
@@ -102,7 +102,7 @@ v1 相对 v0 的关键架构变化：
 | `AsyncMPClient` | `AsyncLLM`（在线服务） | ZMQ + asyncio task 拉结果 |
 | `DPAsyncMPClient` / `DPLBAsyncMPClient` | DP 外部/内部负载均衡 | 多 engine，按负载选 engine |
 
-`MPClient`（`core_client.py:503`）基类负责 ZMQ 建连、`launch_core_engines`、等 ready、监控 engine 存活（`start_engine_core_monitor`）。`SyncMPClient.get_output()` 阻塞取 `EngineCoreOutputs`；`AsyncMPClient.get_output_async()` 从 `asyncio.Queue` 取。
+`MPClient`（`core_client.py:556`）基类负责 ZMQ 建连、`launch_core_engines`、等 ready、监控 engine 存活（`start_engine_core_monitor`）。`SyncMPClient.get_output()` 阻塞取 `EngineCoreOutputs`；`AsyncMPClient.get_output_async()` 从 `asyncio.Queue` 取。
 
 ## 4. 请求完整数据流
 <!-- tags: request, lifecycle, dataflow, 请求生命周期 -->
@@ -113,19 +113,19 @@ v1 相对 v0 的关键架构变化：
 HTTP 请求
   │
   ▼
-OpenAIServingChat.create_chat_completion   (vllm/entrypoints/openai/chat_completion/serving.py:226)
+OpenAIServingChat.create_chat_completion   (vllm/entrypoints/openai/chat_completion/serving.py:244)
   │  渲染 chat → EngineInput (OnlineRenderer)
   │  构造 SamplingParams
   ▼
-engine_client.generate(engine_input, sampling_params, request_id, ...)   (serving.py:352)
-  │  = AsyncLLM.generate()   (vllm/v1/engine/async_llm.py:550)
+engine_client.generate(engine_input, sampling_params, request_id, ...)   (serving.py:369)
+  │  = AsyncLLM.generate()   (vllm/v1/engine/async_llm.py:655)
   ▼
-AsyncLLM.add_request()   (async_llm.py:283)
+AsyncLLM.add_request()   (async_llm.py:369)
   │  InputProcessor.process_inputs_async()  → EngineCoreRequest  (tokenize / 多模态)
   │  OutputProcessor.add_request()          → RequestState + RequestOutputCollector(队列)
   │  n>1 时用 ParentRequest 扇出子请求
   ▼
-engine_core.add_request_async(request)   (AsyncMPClient, core_client.py:1149)
+engine_core.add_request_async(request)   (AsyncMPClient, core_client.py:1253)
   │  ZMQ ROUTER 发送 (EngineCoreRequestType.ADD, EngineCoreRequest)
   ▼
 [EngineCore 进程] process_input_sockets 线程
@@ -133,26 +133,26 @@ engine_core.add_request_async(request)   (AsyncMPClient, core_client.py:1149)
   ▼
 input_queue → run_busy_loop → step_fn
   │
-  ├─ Scheduler.schedule()          (vllm/v1/core/sched/scheduler.py:484)
+  ├─ Scheduler.schedule()          (vllm/v1/core/sched/scheduler.py:570)
   │    分配 KV blocks、算 num_scheduled_tokens → SchedulerOutput
   ├─ ModelExecutor.execute_model(scheduler_output, non_block=True)
-  │    └─ [Worker 进程] GPUModelRunner.execute_model  (vllm/v1/worker/gpu_model_runner.py:4288)
+  │    └─ [Worker 进程] GPUModelRunner.execute_model  (vllm/v1/worker/gpu_model_runner.py:4197)
   │         _update_states → _prepare_inputs → 模型前向 → 返回 logits (不采样)
   ├─ Scheduler.get_grammar_bitmask(scheduler_output)   (结构化输出)
   ├─ ModelExecutor.sample_tokens(grammar_output)
-  │    └─ [Worker 进程] GPUModelRunner.sample_tokens  (gpu_model_runner.py:4667)
-  │         apply_grammar_bitmask → Sampler.forward  (vllm/v1/sample/sampler.py:73)
+  │    └─ [Worker 进程] GPUModelRunner.sample_tokens  (gpu_model_runner.py:4578)
+  │         apply_grammar_bitmask → Sampler.forward  (vllm/v1/sample/sampler.py:72)
   │         → ModelRunnerOutput (sampled_token_ids, logprobs, ...)
   └─ Scheduler.update_from_output(scheduler_output, model_runner_output)
-       (scheduler.py:1737)  更新请求状态、检测 finish、释放/保留 blocks
+       (scheduler.py:1922)  更新请求状态、检测 finish、释放/保留 blocks
        → dict[client_index, EngineCoreOutputs]
   ▼
 output_queue → process_output_sockets 线程 → ZMQ PUSH
   ▼
 [API server 进程] AsyncMPClient 输出 task → outputs_queue
   ▼
-AsyncLLM._run_output_handler 的 output_handler 协程  (async_llm.py:665)
-  │  OutputProcessor.process_outputs()  (output_processor.py:598)
+AsyncLLM._run_output_handler 的 output_handler 协程  (async_llm.py:780)
+  │  OutputProcessor.process_outputs()  (output_processor.py:641)
   │    detokenize (IncrementalDetokenizer) → stop 检查 → 构造 RequestOutput
   │    推入每个请求的 RequestOutputCollector 队列
   ▼
@@ -161,8 +161,8 @@ AsyncLLM.generate() 的 async generator 从队列取 RequestOutput → yield
 OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 ```
 
-**同步 `LLM.generate` 路径**（`vllm/entrypoints/llm.py:418`）：
-`LLM.generate` → `_run_completion`（`vllm/entrypoints/offline_utils.py:326`）→ `_add_completion_requests`（逐条 `llm_engine.add_request`）→ `_run_engine`（`offline_utils.py:573`）循环 `while llm_engine.has_unfinished_requests(): llm_engine.step()`。`LLMEngine.step()`（`vllm/v1/engine/llm_engine.py:298`）= `engine_core.get_output()` + `output_processor.process_outputs()`（无队列，直接返回 `list[RequestOutput]`）+ abort + 记 stats。
+**同步 `LLM.generate` 路径**（`vllm/entrypoints/llm.py:419`）：
+`LLM.generate` → `_run_completion`（`vllm/entrypoints/offline_utils.py:334`）→ `_add_completion_requests`（逐条 `llm_engine.add_request`）→ `_run_engine`（`offline_utils.py:581`）循环 `while llm_engine.has_unfinished_requests(): llm_engine.step()`。`LLMEngine.step()`（`vllm/v1/engine/llm_engine.py:302`）= `engine_core.get_output()` + `output_processor.process_outputs()`（无队列，直接返回 `list[RequestOutput]`）+ abort + 记 stats。
 
 **关键数据结构**（`vllm/v1/engine/__init__.py`）：
 - `EngineCoreRequest`（`:107`）：`request_id, prompt_token_ids, mm_features, sampling_params, pooling_params, arrival_time, lora_request, cache_salt, data_parallel_rank, client_index, priority, ...`。
@@ -173,7 +173,7 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 ## 5. 核心配置体系
 <!-- tags: config, vllmconfig, 配置 -->
 
-### VllmConfig（`vllm/config/vllm.py:357`）
+### VllmConfig（`vllm/config/vllm.py:354`）
 <!-- tags: vllmconfig, dataclass, 子配置, 字段 -->
 
 聚合所有子配置的 dataclass。主要字段：
@@ -196,7 +196,7 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 | `compilation_config` | `CompilationConfig` | `config/compilation.py` |
 | `kv_transfer_config` | `KVTransferConfig \| None` | `config/kv_transfer.py` |
 | `quant_config` | `QuantizationConfig \| None` | `config/quantization.py` |
-| `optimization_level` | `OptimizationLevel`（默认 O2） | `config/vllm.py:130` |
+| `optimization_level` | `OptimizationLevel`（默认 O2） | `config/vllm.py:436` |
 | `performance_mode` | `"balanced"/"interactivity"/"throughput"` | `config/vllm.py` |
 
 > 注意：本版本**没有独立的 `DecodingConfig`**（vLLM 早期有，现已并入 `ModelConfig`/`SamplingParams`）。
@@ -204,9 +204,9 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 ### 配置解析链
 <!-- tags: config, 解析链, engineargs, post-init, 推导 -->
 
-1. **CLI / 代码参数 → `EngineArgs`**（`vllm/engine/arg_utils.py:424`）：`EngineArgs` 是一个扁平 dataclass，字段名与 CLI flag 一一对应（如 `tensor_parallel_size`、`gpu_memory_utilization`、`max_num_batched_tokens`）。`AsyncEngineArgs(EngineArgs)`（`:2870`）加 `enable_log_requests` 等。
-2. **`EngineArgs.create_engine_config(usage_context)`**（`arg_utils.py:1956`）：按序构造各子 config —— `create_model_config()` → `CacheConfig` → `ParallelConfig` → `create_speculative_config()` → `SchedulerConfig` → `LoRAConfig` → `AttentionConfig` → ... → 组装 `VllmConfig`。期间做大量默认值推导与合法性校验（如 DP 模式互斥、`max_num_batched_tokens`/`max_num_seqs` 默认值由 `_set_default_max_num_seqs_and_batched_tokens_args` 定）。
-3. **`VllmConfig.__post_init__`**（`vllm.py:1101`）：做跨 config 的最终推导，例如按 executor 能力决定 `async_scheduling`（`vllm.py:1220-1307`）、设 `distributed_executor_backend`、算 `max_concurrent_batches` 等。
+1. **CLI / 代码参数 → `EngineArgs`**（`vllm/engine/arg_utils.py:446`）：`EngineArgs` 是一个扁平 dataclass，字段名与 CLI flag 一一对应（如 `tensor_parallel_size`、`gpu_memory_utilization`、`max_num_batched_tokens`）。`AsyncEngineArgs(EngineArgs)`（`:2870`）加 `enable_log_requests` 等。
+2. **`EngineArgs.create_engine_config(usage_context)`**（`arg_utils.py:2055`）：按序构造各子 config —— `create_model_config()` → `CacheConfig` → `ParallelConfig` → `create_speculative_config()` → `SchedulerConfig` → `LoRAConfig` → `AttentionConfig` → ... → 组装 `VllmConfig`。期间做大量默认值推导与合法性校验（如 DP 模式互斥、`max_num_batched_tokens`/`max_num_seqs` 默认值由 `_set_default_max_num_seqs_and_batched_tokens_args` 定）。
+3. **`VllmConfig.__post_init__`**（`vllm.py:1273`）：做跨 config 的最终推导，例如按 executor 能力决定 `async_scheduling`（`vllm.py:1418-1467`）、设 `distributed_executor_backend`、算 `max_concurrent_batches` 等。
 4. **环境变量**：`vllm/envs.py` 集中定义（`VLLM_ENABLE_V1_MULTIPROCESSING`、`VLLM_ENGINE_READY_TIMEOUT_S`、`VLLM_V1_OUTPUT_PROC_CHUNK_SIZE`、`VLLM_LOG_STATS_INTERVAL` 等），`EngineArgs` 字段默认值多取自对应 config 的默认值，CLI 未显式给时回落到 env / config 默认。
 5. **JSON / dict**：`compilation_config`、`speculative_config`、`kv_transfer_config`、`attention_config` 等支持传 dict，在 `LLM.__init__`（`entrypoints/llm.py:260` 的 `_make_config`）或 `create_engine_config` 里转成对应 config 实例。
 
@@ -214,9 +214,9 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 <!-- tags: config, 字段, modelconfig, cacheconfig, schedulerconfig -->
 
 - **`ModelConfig`**（`config/model.py:124`）：`model`、`runner`（`auto/generate/pooling`）、`dtype`、`max_model_len`、`quantization`、`enforce_eager`、`seed`、`trust_remote_code`、`tokenizer_mode`、`enable_sleep_mode`、`pooler_config`。
-- **`CacheConfig`**（`config/cache.py:56`）：`gpu_memory_utilization`（默认 0.92）、`kv_cache_memory_bytes`、`block_size`、`enable_prefix_caching`（默认 True）、`kv_cache_dtype`、`num_gpu_blocks`（运行时 profile 后填）。
+- **`CacheConfig`**（`config/cache.py:68`）：`gpu_memory_utilization`（默认 0.92）、`kv_cache_memory_bytes`、`block_size`、`enable_prefix_caching`（默认 True）、`kv_cache_dtype`、`num_gpu_blocks`（运行时 profile 后填）。
 - **`SchedulerConfig`**（`config/scheduler.py:26`）：`max_num_batched_tokens`（默认 2048）、`max_num_seqs`（默认 128）、`enable_chunked_prefill`、`policy`（`scheduling_policy`）、`async_scheduling`、`stream_interval`（默认 1）、`scheduler_cls`、`watermark`、`prefill_schedule_interval`。
-- **`ParallelConfig`**（`config/parallel.py:119`）：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`distributed_executor_backend`（`mp`/`ray`/`uni`/`external_launcher`）、`enable_expert_parallel`、`data_parallel_external_lb`/`hybrid_lb`、`enable_elastic_ep`、`numa_bind`。
+- **`ParallelConfig`**（`config/parallel.py:124`）：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`distributed_executor_backend`（`mp`/`ray`/`uni`/`external_launcher`）、`enable_expert_parallel`、`data_parallel_external_lb`/`hybrid_lb`、`enable_elastic_ep`、`numa_bind`。
 - **`LoadConfig`**（`config/load.py:27`）：`load_format`（默认 `auto`）、`download_dir`、`device`、`max_parallel_loading_workers`。
 - **`ObservabilityConfig`**（`config/observability.py:18`）：`otlp_traces_endpoint`、`collect_detailed_traces`、`kv_cache_metrics`、`show_hidden_metrics_for_version`。
 
@@ -225,7 +225,7 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 
 | 维度 | `LLM`（同步，离线） | `AsyncLLM`（异步，在线） |
 |------|--------------------|--------------------------|
-| 入口类 | `vllm/entrypoints/llm.py:67` | `vllm/v1/engine/async_llm.py:72` |
+| 入口类 | `vllm/entrypoints/llm.py:67` | `vllm/v1/engine/async_llm.py:79` |
 | 引擎 | `LLMEngine`（`v1/engine/llm_engine.py:48`） | 自身即 `EngineClient` |
 | EngineCoreClient | `SyncMPClient`（或 `InprocClient`） | `AsyncMPClient`（或 DP 变体） |
 | 驱动方式 | 用户循环调 `llm_engine.step()`（`offline_utils._run_engine`） | 后台 `output_handler` asyncio task 自动拉取 |
@@ -234,8 +234,8 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 | 多模态预处理 | 同步 `process_inputs` | 异步 `process_inputs_async`（不阻塞 event loop） |
 
 - `LLM` 构造时 `disable_log_stats=True`（`llm.py:228`），并禁止单进程 `data_parallel_size>1`（`llm.py:283`，会挂起）。
-- `AsyncLLM` 支持 streaming input（`AsyncGenerator[StreamingInput]`，`async_llm.py:441`）、`data_parallel_rank` 路由、reasoning parser 等在线特性。
-- 两者都通过 `InputProcessor`（`v1/engine/input_processor.py:38`）把 prompt 转 `EngineCoreRequest`，通过 `OutputProcessor`（`v1/engine/output_processor.py:438`）把 `EngineCoreOutput` 转 `RequestOutput`。区别只在 `OutputProcessor` 是否带 per-request 队列（`RequestOutputCollector`）。
+- `AsyncLLM` 支持 streaming input（`AsyncGenerator[StreamingInput]`，`async_llm.py:458`）、`data_parallel_rank` 路由、reasoning parser 等在线特性。
+- 两者都通过 `InputProcessor`（`v1/engine/input_processor.py:38`）把 prompt 转 `EngineCoreRequest`，通过 `OutputProcessor`（`v1/engine/output_processor.py:464`）把 `EngineCoreOutput` 转 `RequestOutput`。区别只在 `OutputProcessor` 是否带 per-request 队列（`RequestOutputCollector`）。
 
 ## 7. 关键文件
 <!-- tags: files -->

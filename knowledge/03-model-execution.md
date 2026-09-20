@@ -1,24 +1,38 @@
 # 模型执行与编译优化
 
-> 版本：基于 vLLM main（`f32b17b6d6`，2026-08-21），最新 release tag **v0.28.0rc1**（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 版本：基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的"模型执行层"由三层组成：
-1. **ModelRunner**（`vllm/v1/worker/gpu_model_runner.py`）——把调度器产出的 `SchedulerOutput` 组织成 forward 输入、执行模型 forward、产出 logits/sampled tokens。
+1. **ModelRunner**——把调度器产出的 `SchedulerOutput` 组织成 forward 输入、执行模型 forward、产出 logits/sampled tokens。**v0.29 起默认是 Model Runner V2**（`vllm/v1/worker/gpu/model_runner.py`，约 2300 行，按功能拆分的重构版）；旧版 V1（`vllm/v1/worker/gpu_model_runner.py`，约 7700 行巨石）仍在，可用 `VLLM_USE_V2_MODEL_RUNNER=0` 回退（见 §1.3）。
 2. **model_executor**（`vllm/model_executor/`）——模型定义、算子层、权重加载、kernel。
-2. **compilation**（`vllm/compilation/`）——torch.compile 集成、piecewise 编译 + CUDA Graph。
-3. **Worker**（`vllm/v1/worker/gpu_worker.py`）——设备初始化、显存 profiling、warmup/capture 的编排入口。
+3. **compilation**（`vllm/compilation/`）——torch.compile 集成、piecewise 编译 + CUDA Graph。
+4. **Worker**（`vllm/v1/worker/gpu_worker.py`）——设备初始化、显存 profiling、warmup/capture 的编排入口，按 `vllm_config.use_v2_model_runner` 选 V1/V2 runner（`gpu_worker.py:444`）。
 
 数据流：`SchedulerOutput → GPUModelRunner.execute_model() → _prepare_inputs() → _model_forward() → compute_logits() → sample_tokens()`。
 
 ---
 
 ## 1. ModelRunner 的职责（GPUModelRunner）
-<!-- tags: modelrunner, gpu-model-runner, execute-model, step -->
+<!-- tags: modelrunner, gpu-model-runner, execute-model, step, model-runner-v2, mrv2 -->
 
-核心类 `GPUModelRunner`（`vllm/v1/worker/gpu_model_runner.py:501`，约 8000 行）。它持有：
+v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vllm_config.use_v2_model_runner` 二选一：
+
+- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:185`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，`gpu/model_runner.py:1750` 附近），此前 microbatched 步只能 eager/piecewise。
+- **Model Runner V1（legacy，回退用）**：`vllm/v1/worker/gpu_model_runner.py:496`（约 7700 行）。下文 §1.1/§1.2 的详细行号锚点仍以 V1 为准（V2 的方法名/流程一致，但行号不同）。
+
+`VllmConfig.use_v2_model_runner`（`vllm/config/vllm.py:694`）的判定优先级：
+1. 设了 `hisparse_config`（HiSparse）→ **强制 V2**（V1 直接报错）；
+2. 设了 `watermark_config`（水印）→ 强制 V2（覆盖 `=0`）；
+3. 显式 `VLLM_USE_V2_MODEL_RUNNER=0/1`（`vllm/envs.py:302`，默认 `None`）；
+4. ROCm 上命中 `ROCM_DEFAULT_MRV1_ARCHITECTURES` 白名单的架构 → 回退 V1；
+5. 无 Triton → 回退 V1；
+6. `_get_v2_model_runner_unsupported_features()` 命中未支持特性 → 回退 V1；
+7. 否则默认 **V2**。
+
+核心类（V1 描述，V2 结构等价）持有：
 - `self.model`（`nn.Module`，由 `load_model` 加载并可能包上 CUDA Graph wrapper）
-- `self.input_batch`（`InputBatch`，`vllm/v1/worker/gpu_input_batch.py:92`）——**持久化**的批状态（token ids、positions、block table、num_computed_tokens 等），跨 step 复用，避免每步重建
+- `self.input_batch`（`InputBatch`，`vllm/v1/worker/gpu_input_batch.py:90`）——**持久化**的批状态（token ids、positions、block table、num_computed_tokens 等），跨 step 复用，避免每步重建
 - `self.sampler`、`self.drafter`（spec decode）、`self.kv_caches`、`self.attn_groups`
 
 ### 1.1 一次 step 的主流程（`execute_model`，:4288）
@@ -37,7 +51,7 @@ vLLM 的"模型执行层"由三层组成：
 3. `_build_attention_metadata(...)`（:2355）构建 attention metadata（含 block table、slot mapping、seq lens、cascade attn 等）。
 3.5 `_determine_batch_execution_and_padding`（:4054）：判定本步的 **CUDA Graph 运行模式**（FULL/PIECEWISE/NONE）、padding 后的 `num_tokens`、是否 microbatch（DBO）、DP 协调。
 4. `_preprocess`（:3612）把 `input_ids/inputs_embeds/positions` 等整理成 padded 张量。
-5. `set_forward_context(attn_metadata, ..., cudagraph_runtime_mode, batch_descriptor, slot_mapping)`（:4546）——**关键**：把 attention metadata、slot mapping、cudagraph 模式塞进 thread-local 的 `ForwardContext`（`vllm/forward_context.py:132`），模型内部的 `Attention` 层通过 `get_forward_context()` 读取。
+5. `set_forward_context(attn_metadata, ..., cudagraph_runtime_mode, batch_descriptor, slot_mapping)`（:4546）——**关键**：把 attention metadata、slot mapping、cudagraph 模式塞进 thread-local 的 `ForwardContext`（`vllm/forward_context.py:130`），模型内部的 `Attention` 层通过 `get_forward_context()` 读取。
 6. `_model_forward(input_ids, positions, ...)`（:3956）→ `self.model(...)` 得到 `hidden_states`。
 7. `sample_hidden_states = hidden_states[logits_indices]`；`logits = self.model.compute_logits(sample_hidden_states)`（:4598-4599）。
 8. 结果存入 `self.execute_model_state`，`execute_model` 返回 `None`；随后 `sample_tokens()`（:4667）真正采样。
@@ -54,22 +68,22 @@ vLLM 的"模型执行层"由三层组成：
 ## 2. 模型加载（model_loader）
 <!-- tags: loading, load-format, weights, 权重加载, sharded -->
 
-目录 `vllm/model_executor/model_loader/`。入口 `get_model()`（`__init__.py:127`）→ `get_model_loader(load_config)` 按 `load_format` 选 loader。
+目录 `vllm/model_executor/model_loader/`。入口 `get_model()`（`__init__.py:131`）→ `get_model_loader(load_config)` 按 `load_format` 选 loader。
 
 ### 2.1 load_format 与 loader 映射（`__init__.py:48`）
 <!-- tags: load-format, loader, 加载, safetensors, dummy -->
 
 | load_format | loader | 说明 |
 |---|---|---|
-| `auto`/`hf`/`safetensors`/`fastsafetensors`/`instanttensor`/`mistral`/`npcache`/`pt` | `DefaultModelLoader` |
+| `auto`/`hf`/`safetensors`/`fastsafetensors`/`instanttensor`/`mistral`/`npcache`/`pt` | `DefaultModelLoader` |（`fastsafetensors` 即 Fast Start 快速加载器，v0.30 起支持 **nnode>1** 多节点，#55468，用 GPU uuid 作 socket folder 标识，#56669） |
 | `dummy` | `DummyModelLoader` | 随机权重（profiling / 测试） |
 | `modelexpress` | `ModelExpressModelLoader` |
 | `runai_streamer` / `runai_streamer_sharded` / `sharded_state` | `RunaiModelStreamerLoader` / `ShardedStateLoader` |
 | `tensorizer` | `TensorizerLoader` |
 
-`LoadFormats`（`__init__.py:32`）不含 gguf；GGUF 走 `llm-compressor`/`mistral` 等外部量化路径。`register_model_loader`（:66）允许注册自定义 loader。
+`LoadFormats`（`__init__.py:33`）不含 gguf；GGUF 走 `llm-compressor`/`mistral` 等外部量化路径。`register_model_loader`（:66）允许注册自定义 loader。
 
-### 2.2 加载流程（`BaseModelLoader.load_model`，`base_loader.py:43`）
+### 2.2 加载流程（`BaseModelLoader.load_model`，`base_loader.py:56`）
 <!-- tags: loading, load-model, weights, 加载流程, process-weights -->
 
 1. `initialize_model(vllm_config, ...)`（`model_loader/utils.py:38`）：按 `model_config.architectures` 找到模型类（`get_model_architecture`），在 `set_current_vllm_config` 上下文里实例化——**此时所有并行层（ColumnParallelLinear 等）据此读取 TP rank 创建**，权重先建在目标 device 上。
@@ -82,10 +96,10 @@ vLLM 的"模型执行层"由三层组成：
 ### 2.3 权重如何切分到 TP 各 rank
 <!-- tags: tp, weight-loader, 切分, column-parallel, row-parallel -->
 
-切分**不在 loader 里做**，而在**每个并行层的 `weight_loader`** 里做。模型 `load_weights`（如 `LlamaModel.load_weights`，`models/llama.py:441`）用 `AutoWeightsLoader` 把 checkpoint 的 tensor 按名字分发给各层，各层 `weight_loader` 只 `narrow` 出本 rank 的分片：
-- `ColumnParallelLinear.weight_loader`（`layers/linear.py:548`）：按 `output_dim` 切。
+切分**不在 loader 里做**，而在**每个并行层的 `weight_loader`** 里做。模型 `load_weights`（如 `LlamaModel.load_weights`，`models/llama.py:459`）用 `AutoWeightsLoader` 把 checkpoint 的 tensor 按名字分发给各层，各层 `weight_loader` 只 `narrow` 出本 rank 的分片：
+- `ColumnParallelLinear.weight_loader`（`layers/linear.py:576`）：按 `output_dim` 切。
 - `RowParallelLinear.weight_loader`（:1614）：按 `input_dim` 切，`start_idx = tp_rank * shard_size`。
-- `QKVParallelLinear` / `MergedColumnParallelLinear`：按 head / 子模块切，`packed_modules_mapping`（`llama.py:457`）把 checkpoint 的 `q_proj/k_proj/v_proj` 映射到融合的 `qkv_proj`。
+- `QKVParallelLinear` / `MergedColumnParallelLinear`：按 head / 子模块切，`packed_modules_mapping`（`llama.py:475`）把 checkpoint 的 `q_proj/k_proj/v_proj` 映射到融合的 `qkv_proj`。
 - 量化权重：`weight_loader_v2` + `BasevLLMParameter`（`WEIGHT_LOADER_V2_SUPPORTED`）。
 
 > 即：**每个 rank 只加载自己那份分片**，因此 TP>1 时单卡权重 = 全量 / tp_size。
@@ -98,7 +112,7 @@ vLLM 的"模型执行层"由三层组成：
 ### 2.5 配置/调优旋钮（加载）
 <!-- tags: load-config, 旋钮, load-format, quantization -->
 
-- `--load-format`（`arg_utils.py:448`）：`auto/hf/safetensors/fastsafetensors/instanttensor/mistral/tensorizer/...`。
+- `--load-format`（`arg_utils.py:994`）：`auto/hf/safetensors/fastsafetensors/instanttensor/mistral/tensorizer/...`。
 - `LoadConfig`（`vllm/config/load.py:27`）：`download_dir`、`safetensors_load_strategy`（`lazy` 等）、`safetensors_prefetch_num_threads`、`safetensors_prefetch_block_size`、`model_loader_extra_config`（`enable_multithread_load`、`num_threads`）、`ignore_patterns`。
 - `--quantization`：选择量化后端。
 
@@ -107,9 +121,9 @@ vLLM 的"模型执行层"由三层组成：
 ## 3. 核心算子层（layers）
 <!-- tags: layers, operators, attention-layer, linear, 算子 -->
 
-目录 `vllm/model_executor/layers/`。绝大多数算子继承 `CustomOp`（`vllm/model_executor/custom_op.py:103`）：`forward` 通过 `dispatch_forward` 分发到 `forward_cuda / forward_hip / forward_xpu / forward_cpu / forward_native`，并支持 OOT（out-of-tree）平台覆盖（`op_registry_oot`）。`forward_native` 是纯 PyTorch 实现，供 torch.compile 融合或测试。
+目录 `vllm/model_executor/layers/`。绝大多数算子继承 `CustomOp`（`vllm/model_executor/custom_op.py:102`）：`forward` 通过 `dispatch_forward` 分发到 `forward_cuda / forward_hip / forward_xpu / forward_cpu / forward_native`，并支持 OOT（out-of-tree）平台覆盖（`op_registry_oot`）。`forward_native` 是纯 PyTorch 实现，供 torch.compile 融合或测试。
 
-### 3.1 Attention（`layers/attention/attention.py:218`）
+### 3.1 Attention（`layers/attention/attention.py:225`）
 <!-- tags: attention, 算子, kv-cache-update, piecewise, forward -->
 
 `Attention.forward(query, key, value, ...)`（:478）：
@@ -131,7 +145,7 @@ vLLM 的"模型执行层"由三层组成：
 - `RowParallelLinear`（:1510）：权重按**输入维**切；`reduce_results=True` 时 all-reduce（bias 只在 rank0 加，避免重复）。
 - `DCPGroupColumnParallelLinear`（:604）：Decode Context Parallelism 下按 DCP group 切。
 
-**TP 配合**：一个 decoder 层典型是 `QKVParallelLinear → Attention → RowParallelLinear`（attention 部分无通信），`gate_up_proj(MergedColumnParallelLinear) → act → down_proj(RowParallelLinear)`（MLP 尾部 all-reduce）。`LlamaAttention`（`models/llama.py:122`）与 `LlamaMLP`（:115）展示了标准组合。
+**TP 配合**：一个 decoder 层典型是 `QKVParallelLinear → Attention → RowParallelLinear`（attention 部分无通信），`gate_up_proj(MergedColumnParallelLinear) → act → down_proj(RowParallelLinear)`（MLP 尾部 all-reduce）。`LlamaAttention`（`models/llama.py:125`）与 `LlamaMLP`（:115）展示了标准组合。
 
 ### 3.3 其他算子
 <!-- tags: operators, rmsnorm, activation, rotary, moe -->
@@ -140,7 +154,7 @@ vLLM 的"模型执行层"由三层组成：
 - **Activation**（`activation.py`）：`SiluAndMul`（:112，SwiGLU 的 gate*up 融合）、`GeluAndMul`、`GELU/GELUTanh/NewGELU/FastGELU/QuickGELU` 等。
 - **Rotary embedding**（`rotary_embedding/`）：`RotaryEmbeddingBase`/`RotaryEmbedding`（`base.py`），`forward_cuda` 走 fused kernel；变体 `yarn_scaling_rope.py`、`ntk_scaling_rope.py`、`llama3_rope.py`、`mrope.py`（多模态）、`dual_chunk_rope.py` 等。
 - **Embedding / LMHead**（`vocab_parallel_embedding.py`）：`VocabParallelEmbedding`（:198，按 vocab 切）、`ParallelLMHead`（:521）。
-- **Logits**（`logits_processor.py:23`）：`LogitsProcessor` 做 scale/soft-cap/processor。
+- **Logits**（`logits_processor.py:58`）：`LogitsProcessor` 做 scale/soft-cap/processor。
 - **MoE**（`fused_moe/`）：`FusedMoE`（`layer.py`）+ `modular_kernel.py`，含 `router/`、`experts/`、`prepare_finalize/`、`oracle/`；EP 用 all2all（`all2all_utils.py`）。
 - **MLA**（`mla.py`）、**Mamba/线性注意力**（`mamba/`、`lightning_attn.py`）。
 
@@ -149,7 +163,7 @@ vLLM 的"模型执行层"由三层组成：
 ## 4. 编译与 torch.compile 集成
 <!-- tags: compile, torch-compile, inductor, 编译 -->
 
-配置类 `CompilationConfig`（`vllm/config/compilation.py:398`）。
+配置类 `CompilationConfig`（`vllm/config/compilation.py:397`）。
 
 ### 4.1 CompilationMode（`compilation.py:37`）
 <!-- tags: compilation-mode, 编译模式, vllm-compile, eager -->
@@ -162,21 +176,21 @@ vLLM 的"模型执行层"由三层组成：
 ### 4.2 编译入口与后端
 <!-- tags: compile, backend, split-graph, piecewise, inductor-pass -->
 
-- 模型类用 `@support_torch_compile` 装饰（`compilation/decorators.py:118`），声明 `dynamic_arg_dims`（如 `{"input_ids": {0: "b"}, "positions": {0: "b"}}`，`models/llama.py:337`）标记动态维。
+- 模型类用 `@support_torch_compile` 装饰（`compilation/decorators.py:120`），声明 `dynamic_arg_dims`（如 `{"input_ids": {0: "b"}, "positions": {0: "b"}}`，`models/llama.py:337`）标记动态维。
 - `TorchCompileWithNoGuardsWrapper`（`compilation/wrapper.py:47`）：对非 STOCK 模式**丢弃所有 guard**（`skip_all_guards_unsafe`），保证只编译一次。
-- `VllmBackend`（`compilation/backends.py:805`）：`__call__`（:1020）拿到 Dynamo 的 FX 图后：
+- `VllmBackend`（`compilation/backends.py:801`）：`__call__`（:1020）拿到 Dynamo 的 FX 图后：
   1. 计算 cache key（env_hash + config_hash + code_hash + compiler_hash），生成 `cache_dir`（`torch_compile_cache/<hash>/rank_i_j/`）。
   2. `split_graph(graph, splitting_ops)`（:553）按 `splitting_ops`（默认 attention ops）把图切成 **piecewise 子图**。
   3. `PiecewiseCompileInterpreter`（:687）把每个子图替换成 `PiecewiseBackend` 实例并编译。
   4. `generate_execution_code` + `compile_execution_fn`（`codegen.py`）生成把子图串起来的执行函数。
 - `PiecewiseBackend`（`compilation/piecewise_backend.py:86`）：对每个子图，先按**通用 shape**（symbolic）编译一次，再对 `compile_sizes`/`compile_ranges` 里的具体 shape 各编译一份，运行时按 shape 分发。
-- `CompilerManager`（`backends.py:124`）：缓存 `(Range, graph_index, backend) → 编译产物；`make_compiler`（:96）选 `InductorAdaptor` / `InductorStandaloneAdaptor`（`VLLM_USE_STANDALONE_COMPILE=1` 默认）/ `EagerAdaptor`。
-- 自定义 Inductor pass 在 `compilation/passes/`：`fusion/`（`rms_quant_fusion.py`、`act_quant_fusion.py`、`attn_quant_fusion.py`、`allreduce_rms_fusion.py`、`sequence_parallelism.py`、`qk_norm_rope_fusion.py` 等）、`ir/`、`utility/`（`noop_elimination.py` 等），由 `PassConfig`（`compilation.py:107`）开关。
+- `CompilerManager`（`backends.py:125`）：缓存 `(Range, graph_index, backend) → 编译产物；`make_compiler`（:96）选 `InductorAdaptor` / `InductorStandaloneAdaptor`（`VLLM_USE_STANDALONE_COMPILE=1` 默认）/ `EagerAdaptor`。
+- 自定义 Inductor pass 在 `compilation/passes/`：`fusion/`（`rms_quant_fusion.py`、`act_quant_fusion.py`、`attn_quant_fusion.py`、`allreduce_rms_fusion.py`、`sequence_parallelism.py`、`qk_norm_rope_fusion.py` 等）、`ir/`、`utility/`（`noop_elimination.py` 等），由 `PassConfig`（`compilation.py:114`）开关。
 
 ### 4.3 编译缓存
 <!-- tags: compile-cache, 编译缓存, cache-hash, 落盘 -->
 
-编译产物落盘到 `VLLM_CACHE_ROOT/torch_compile_cache/<hash>/rank_i_j/`（`vllm_compile_cache.py`、`computation_graph.py`、`transformed_code.py`）。hash 因子：`env_hash/config_hash/code_hash/compiler_hash`（`backends.py:1055-1079`）。`VLLM_DISABLE_COMPILE_CACHE=1` 关闭；`compile_cache_save_format`（`binary`/`unpacked`）控制格式。
+编译产物落盘到 `VLLM_CACHE_ROOT/torch_compile_cache/<hash>/rank_i_j/`（`vllm_compile_cache.py`、`computation_graph.py`、`transformed_code.py`）。hash 因子：`env_hash/config_hash/code_hash/compiler_hash`（`backends.py:1051-1075`）。`VLLM_DISABLE_COMPILE_CACHE=1` 关闭；`compile_cache_save_format`（`binary`/`unpacked`）控制格式。
 
 ---
 
@@ -197,10 +211,10 @@ vLLM 的"模型执行层"由三层组成：
 ### 5.2 捕获哪些 batch size（capture sizes）
 <!-- tags: cudagraph, capture-sizes, 批大小, 捕获, spec-decode -->
 
-`VllmConfig.post_init`（`config/vllm.py:1937`）计算 `cudagraph_capture_sizes`：
+`VllmConfig.post_init`（`config/vllm.py:2378`）计算 `cudagraph_capture_sizes`：
 - `max_cudagraph_capture_size` 默认 = `min(max_num_seqs * decode_query_len * 2, 512)`（Blackwell 数据中心卡为 1024），再 `min(max_num_batched_tokens)`。
 - 默认 sizes = `[1,2,4] + range(8,256,8) + range(256,max,16)`；`performance_mode="interactivity"` 时用 `range(1, min(max,32)+1)` 细粒度。
-- spec decode 时 `adjust_cudagraph_sizes_for_spec_decode`（`compilation.py:1519`）把 sizes 向上取整到 `uniform_decode_query_len`（=1+num_spec_tokens）的倍数。
+- spec decode 时 `adjust_cudagraph_sizes_for_spec_decode`（`compilation.py:1536`）把 sizes 向上取整到 `uniform_decode_query_len`（=1+num_spec_tokens）的倍数。
 
 ### 5.3 CudagraphDispatcher（`vllm/v1/cudagraph_dispatcher.py:15`）
 <!-- tags: cudagraph-dispatcher, dispatch, 分发, batch-descriptor, padding -->
@@ -232,20 +246,20 @@ vLLM 的"模型执行层"由三层组成：
 
 - `STOCK_TORCH_COMPILE`：直接 `self.model.compile(fullgraph=True, backend=...)`（:5544）。
 - 否则：`is_breakable_cudagraph_enabled()` → `BreakableCUDAGraphWrapper`；或 `cudagraph_mode.has_full_cudagraphs()` → `CUDAGraphWrapper(runtime_mode=FULL)`（:5567）；`use_ubatching` → `UBatchWrapper`。
-- piecewise 的 wrapper 在编译期由 `wrap_with_cudagraph_if_needed`（`backends.py:633`）加到每个子图上。
+- piecewise 的 wrapper 在编译期由 `wrap_with_cudagraph_if_needed`（`backends.py:629`）加到每个子图上。
 
 ---
 
 ## 6. Warmup 与显存 profiling
 <!-- tags: warmup, memory-profiling, oom, 显存 -->
 
-入口 `Worker.compile_or_warm_up_model()`（`gpu_worker.py:694`）与 `Worker.determine_available_memory()`（:475）。
+入口 `Worker.compile_or_warm_up_model()`（`gpu_worker.py:776`）与 `Worker.determine_available_memory()`（:475）。
 
 ### 6.1 显存 profiling（`determine_available_memory`）
 <!-- tags: memory-profiling, 显存, profile-run, cudagraph-estimate, available-memory -->
 
 1. 若设了 `kv_cache_memory_bytes`：跳过 profiling，直接返回该值。
-2. 否则 `memory_profiling(...)`（`utils/mem_utils.py:234`）上下文里跑 `model_runner.profile_run()`（`gpu_model_runner.py:6553`）：
+2. 否则 `memory_profiling(...)`（`utils/mem_utils.py:230`）上下文里跑 `model_runner.profile_run()`（`gpu_model_runner.py:6480`）：
    - `profile_run` 用 `max_num_batched_tokens` 的 dummy batch 跑一次 forward（含 MM encoder profiling），触发编译 + 峰值激活。
    - `memory_profiling` 用 `torch.accelerator.get_memory_info` 与 peak stats 区分三类内存：非 vLLM / torch / 非 torch，算出 `non_kv_cache_memory`、`transient_peak_headroom`、`total_consumed`。
 2.5 若启用 cudagraph：`profile_cudagraph_memory()`（:6775）用临时 pool 真实 capture 前 2 个最大 shape，估算 `first_capture + (N-1)*per_graph`，得 `cudagraph_memory_estimate`（受 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 控制，默认开）。
@@ -258,7 +272,7 @@ vLLM 的"模型执行层"由三层组成：
 <!-- tags: warmup, capture, 顺序, kernel-warmup, compile -->
 
 1. `VLLM_COMPILE` 模式下，对 `compile_sizes` 中不在 capture sizes 里的 size（如 `max_num_batched_tokens`）逐个 `_dummy_run` 编译（:721）。
-2. `kernel_warmup(worker)`（`model_executor/warmup/kernel_warmup.py:98`）：预热/autotune 推理期 kernel（Triton JIT、flashinfer 等），避免首请求 JIT 卡顿。
+2. `kernel_warmup(worker)`（`model_executor/warmup/kernel_warmup.py:157`）：预热/autotune 推理期 kernel（Triton JIT、flashinfer 等），避免首请求 JIT 卡顿。
 3. `if not enforce_eager: capture_model()`（:732）——真正 capture 所有 cudagraph，返回实际占用的 `cuda_graph_memory_bytes`，与估算对比打日志。
 4. 打印建议的 `--kv-cache-memory`（:794），`maybe_save_startup_plan`（:806）。
 5. 末尾 `trigger_inductor_lazy_init`、`activate_jit_monitor`、`freeze_gc_heap`、`set_torch_threads_for_runtime`。
@@ -280,7 +294,7 @@ vLLM 的"模型执行层"由三层组成：
 
 - **`vllm/v1/sample/`**：采样逻辑独立成目录——`sampler.py`（`Sampler.forward`，:73）、`rejection_sampler.py`（spec decode 的 rejection sampling）、`logits_processor/`（bad words / logit bias 等）、`thinking_budget_state.py`（reasoning budget 跟踪）。`GPUModelRunner.sample_tokens`（:4667）仍是入口，但具体采样实现委托此目录。
 - **`vllm/v1/fault_tolerance/`**：`EngineCoreSentinel`（`engine_core_sentinel.py`）——EngineCore 进程的哨兵/容错包装，通过 `FT_STATUS_CALL_ID` utility 调用上报 `EngineStatusType`，支持 engine core 故障检测与进程组无状态重建（`stateless_init/destroy_torch_distributed_process_group`），为弹性恢复（Elastic EP 等）提供基础。
-- **Model Runner V2**（`vllm/v1/worker/gpu/`）：实验性重构版 runner（`model_runner.py` + `input_batch/`、`sample/`、`spec_decode/`、`warmup.py` 等子模块），按功能拆分 `gpu_model_runner.py` 的巨石结构，仍在活跃开发中（见其 README），默认路径仍走 `gpu_model_runner.py`。
+- **Model Runner V2**（`vllm/v1/worker/gpu/`）：重构版 runner（`model_runner.py` + `input_batch/`、`sample/`、`spec_decode/`、`warmup.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等子模块），按功能拆分 `gpu_model_runner.py` 的巨石结构。**v0.29 起为默认 runner**（`use_v2_model_runner` 默认 True，见 §1），旧版 `gpu_model_runner.py` 降为 legacy 回退路径（`VLLM_USE_V2_MODEL_RUNNER=0`）。V2 还承载了 HiSparse、watermarking 等新特性（这些特性强制要求 V2）。
 
 ---
 
@@ -304,7 +318,7 @@ vLLM 的"模型执行层"由三层组成：
 | `vllm/forward_context.py` | `ForwardContext` / `BatchDescriptor`（attn metadata、cudagraph 模式载体） |
 | `vllm/model_executor/model_loader/` | 权重加载（`default_loader.py`、`weight_utils.py`、`base_loader.py`） |
 | `vllm/model_executor/layers/` | 算子层（`attention/`、`linear.py`、`layernorm.py`、`activation.py`、`rotary_embedding/`、`fused_moe/`、`quantization/`） |
-| `vllm/model_executor/models/` | 290+ 模型定义（`llama.py` 为参考实现） |
+| `vllm/model_executor/models/` | 380+ 模型架构定义（`llama.py` 为参考实现） |
 | `vllm/model_executor/warmup/` | kernel warmup / JIT warmup |
 | `vllm/utils/mem_utils.py` | `memory_profiling` |
 | `vllm/v1/worker/gpu/` | **实验性 Model Runner V2**（重构中，见其 README） |
@@ -316,9 +330,9 @@ vLLM 的"模型执行层"由三层组成：
 
 ### CLI / 顶层
 <!-- tags: cli, 旋钮, enforce-eager, compilation-config, flags -->
-- `--enforce-eager`（`ModelConfig.enforce_eager`，`config/model.py:241`）：禁用 CUDA Graph + 编译，全 eager（调试/排障）。
-- `--compilation-config` / `-cc`（`arg_utils.py:681`）：JSON 覆盖 `CompilationConfig`，如 `{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8]}`。
-- `--gpu-memory-utilization` / `--kv-cache-memory-bytes`（`arg_utils.py:537/538`）：控制 KV 显存预算。
+- `--enforce-eager`（`ModelConfig.enforce_eager`，`config/model.py:242`）：禁用 CUDA Graph + 编译，全 eager（调试/排障）。
+- `--compilation-config` / `-cc`（`arg_utils.py:923`）：JSON 覆盖 `CompilationConfig`，如 `{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8]}`。
+- `--gpu-memory-utilization` / `--kv-cache-memory-bytes`（`arg_utils.py:1285`）：控制 KV 显存预算。
 - `--max-num-batched-tokens` / `--max-num-seqs`（:539/542）：决定 `max_cudagraph_capture_size` 上界与 capture sizes。
 
 ### CompilationConfig 关键字段
@@ -347,6 +361,6 @@ vLLM 的"模型执行层"由三层组成：
 <!-- tags: deployment, 部署建议, 速查, 延迟, 显存 -->
 - **延迟敏感 decode**：保持默认 `FULL_AND_PIECEWISE`；小模型/小 prompt 可试 `FULL`；P/D 分离的 decode 实例用 `FULL_DECODE_ONLY` 省显存。
 - **显存紧张**：调低 `--gpu-memory-utilization` 或显式 `--kv-cache-memory-bytes`；`max_cudagraph_capture_size` 上限 512/1024 已限制大 graph 的显存/启动开销。
-- **MoE + EP**：`--all2all-backend` 用 `deepep_low_latency`（`deepep_high_throughput` 与 cudagraph 不兼容，会自动降级 `cudagraph_mode=NONE`，见 `compilation.py:1235`）。
+- **MoE + EP**：`--all2all-backend` 用 `deepep_low_latency`（`deepep_high_throughput` 与 cudagraph 不兼容，会自动降级 `cudagraph_mode=NONE`，见 `compilation.py:1239`）。
 - **首次启动慢**：编译 + capture 通常 5~20s+；用编译缓存（`torch_compile_cache`）与 `kernel_warmup` 缓解。
 - **排障**：`--enforce-eager` 关闭图/编译；`VLLM_LOGGING_LEVEL=DEBUG` 会校验 cudagraph 输入地址一致性。

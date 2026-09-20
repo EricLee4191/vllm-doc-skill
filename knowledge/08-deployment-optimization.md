@@ -1,6 +1,6 @@
 # 部署、API 服务与性能调优
 
-> 基于 vLLM main（`f32b17b6d6`，2026-08-21），最新 release tag **v0.28.0rc1**（`cd6ae1e0a0`，2026-08-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 部署形态总览
 <!-- tags: deployment, serve, docker, offline, api-server, 部署 -->
@@ -36,7 +36,7 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
 out = llm.generate(["Hello"], SamplingParams(temperature=0.7, max_tokens=128))
 ```
 
-离线与在线共享同一套 `VllmConfig`（`vllm/config/vllm.py:357`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `kv_transfer_config` / `speculative_config` / `observability_config` 等。
+离线与在线共享同一套 `VllmConfig`（`vllm/config/vllm.py:354`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `kv_transfer_config` / `speculative_config` / `observability_config` 等。
 
 ### 1.2 在线 API server（`vllm serve`）
 <!-- tags: serve, api-server, 在线, 进程模型, rust-frontend -->
@@ -45,7 +45,7 @@ out = llm.generate(["Hello"], SamplingParams(temperature=0.7, max_tokens=128))
 
 `vllm/entrypoints/openai/api_server.py` 现在只是**兼容 shim**（已发 DeprecationWarning），实际逻辑在 `vllm/entrypoints/launchers/`。路由注册入口：`vllm/entrypoints/launchers/api_server/routers.py:register_api_routers()`，按模型 `supported_tasks`（generate / pooling / transcription / realtime）动态挂载各 router。
 
-常用启动参数（`vllm/entrypoints/openai/cli_args.py` 的 `FrontendArgs` + `AsyncEngineArgs`）：
+常用启动参数（`vllm/entrypoints/launchers/cli_args.py` 的 `FrontendArgs` + `AsyncEngineArgs`）：
 
 ```bash
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
@@ -62,7 +62,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 - `--headless`：只跑 engine 不跑 API server（多节点 DP 的从节点用）。
 - `--grpc`：改用 gRPC 协议（`VllmEngineServicer`，proto 来自 `smg-grpc-proto`）。
 - `--optimization-level`（`-O0`~`-O3`，默认 O2）：编译/cudagraph 优化档位，见 §5.4。
-- `--performance-mode balanced|interactivity|throughput`（默认 balanced；throughput 会把 `max_num_batched_tokens` 和 `max_num_seqs` 默认值翻倍，`arg_utils.py:2810`）。
+- `--performance-mode balanced|interactivity|throughput`（默认 balanced；throughput 会把 `max_num_batched_tokens` 和 `max_num_seqs` 默认值翻倍，`arg_utils.py:2953`）。
 
 **Rust frontend（v0.28 新增，实验性）**：`rust/` 目录下的 `vllm-frontend-rs` 是 Python 前端的 Rust 替代实现，用 axum 重建北向 OpenAI 兼容 HTTP 层，仍通过 ZMQ + MessagePack 走既有 engine 边界与 Python engine 进程通信（`rust/README.md`）。分层 crate：`vllm-server`（axum HTTP）→ `vllm-chat`（模板渲染/reasoning/tool 解析）→ `vllm-text`（tokenizer/增量 detokenizer）→ `vllm-llm`（token-in/out facade）→ `vllm-engine-core-client`（ZMQ 传输）。Python 仍负责进程启动，把 Rust API server 作为受管 worker 拉起并传入继承的监听 socket：
 
@@ -70,7 +70,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
-当前**实验性、功能未对齐** Python 前端，生产环境默认仍用 Python 前端（`VLLM_USE_RUST_FRONTEND` 默认 `0`，`envs.py:165`）。
+当前**实验性、功能未对齐** Python 前端，生产环境默认仍用 Python 前端（`VLLM_USE_RUST_FRONTEND` 默认 `0`，`envs.py:166`）。
 
 ### 1.3 Docker 镜像
 <!-- tags: docker, 镜像, target, ipc-host, nonroot -->
@@ -100,7 +100,7 @@ docker run --rm --gpus all \
 ### 1.4 多机 / 大规模部署
 <!-- tags: multi-node, 多机, ray, dp, pd-disaggregation -->
 
-- 单机多卡默认 `mp`（multiprocessing）executor；跨节点用 `--distributed-executor-backend ray`（`ParallelConfig.distributed_executor_backend`，`vllm/config/parallel.py:243`）。
+- 单机多卡默认 `mp`（multiprocessing）executor；跨节点用 `--distributed-executor-backend ray`（`ParallelConfig.distributed_executor_backend`，`vllm/config/parallel.py:260`）。
 - 多节点 mp 后端：`--nnodes N --node-rank R --master-addr IP`。
 - DP（数据并行）：`--data-parallel-size N`，三种 LB 模式（`docs/serving/data_parallel_deployment.md`）：
   - 内部 LB（单入口，默认）；
@@ -119,16 +119,19 @@ docker run --rm --gpus all \
 | 端点 | 说明 | 源码 |
 |---|---|---|
 | `POST /v1/chat/completions` | Chat API（支持流式、tools、reasoning parser） | `entrypoints/openai/chat_completion/api_router.py:41` |
-| `POST /v1/chat/completions/batch` | Chat 批量 | 同上 :78 |
+| `POST /v1/chat/completions/batch` | Chat 批量 | 同上 :83 |
 | `POST /v1/completions` | Completions API（`suffix` 不支持） | `entrypoints/openai/completion/api_router.py:35` |
 | `POST /v1/responses`、`GET /v1/responses/{id}`、`POST /v1/responses/{id}/cancel` | Responses API | `entrypoints/openai/responses/api_router.py` |
 | `GET /v1/models` | 模型列表 | `entrypoints/openai/models/api_router.py:20` |
-| `POST /v1/embeddings` | Embedding（pooling 模型） | `entrypoints/pooling/embed/api_router.py:29` |
+| `POST /v1/embeddings` | Embedding（pooling 模型） | `entrypoints/pooling/embed/api_router.py:28` |
 | `POST /v2/embed`、`/score`、`/v1/score`、`/rerank`、`/v1/rerank`、`/v2/rerank`、`/pooling`、`/classify` | 其他 pooling 任务 | `entrypoints/pooling/*/api_router.py` |
 | `POST /v1/audio/transcriptions`、`/v1/audio/translations` | ASR（Whisper 类模型） | `entrypoints/speech_to_text/*/api_router.py` |
 | `POST /v1/messages`、`/v1/messages/count_tokens` | **Anthropic 兼容** | `entrypoints/anthropic/api_router.py` |
 | `POST /cohere/v2/chat` | Cohere 兼容（`VLLM_ENABLE_COHERE_API=1` 开启） | `entrypoints/cohere/api_router.py` |
 | `POST /inference/v1/generate`、`/abort_requests` | vLLM 原生 token-in/token-out 接口 | `entrypoints/scale_out/token_in_token_out/api_router.py` |
+| `POST /v1/chat/completions/render`、`/v1/messages/render`、`/v1/completions/render`、`/v1/responses/render` | **scale-out render**（v0.29，把请求渲染成 token 序列，供外部 token-in 服务消费） | `entrypoints/scale_out/render/api_router.py` |
+| `POST /v1/chat/completions/derender`、`/v1/completions/derender` | **scale-out derender**（token 序列还原成响应；v0.30 起流式返回 reasoning + tool calls，#50550） | `entrypoints/scale_out/derender/api_router.py` |
+| `POST /release_kv_cache_memory` | **v0.30 新增**（#44890）：释放 KV cache 显存（sleep 场景），dev 路由 | `entrypoints/serve/dev/sleep/api_router.py:31` |
 | `GET /health`、`/load`、`/version`、`/metrics` | 健康检查/负载/Prometheus | `entrypoints/serve/instrumentator/` |
 | `POST /tokenize`、`/detokenize`、`GET /tokenizer_info` | tokenizer 服务 | `entrypoints/serve/tokenize/api_router.py` |
 | `POST /sleep`、`/wake_up`、`GET /is_sleeping` | sleep mode（`VLLM_SERVER_DEV_MODE=1` 才挂载 dev 路由） | `entrypoints/serve/dev/sleep/api_router.py` |
@@ -210,10 +213,14 @@ docker run --rm --gpus all \
 | `VLLM_USE_MODELSCOPE` | `0` | 从 ModelScope 拉模型 |
 | `VLLM_USE_FASTOKENS` | `0` | 用 Rust fastokens 替换 HF fast tokenizer（v0.23+，tokenizer 密集负载收益大） |
 | `VLLM_USE_RUST_FRONTEND` | `0` | 用 Rust `vllm-frontend-rs` 替代 Python 前端（v0.28+，实验性，见 §1.2） |
+| `VLLM_USE_V2_MODEL_RUNNER` | 空（自动） | **v0.29**，强制选 Model Runner V2/V1（默认自动：V2 为默认，见 03 §1） |
+| `--enable-scale-out`（CLI flag） | `False` | **v0.30**（#55176）：开启 scale-out render/derender/token-in 端点。取代了 v0.29 的 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（已移除）；`vllm launch render` 专用模式下默认开（`vllm/entrypoints/scale_out/factories.py:72`） |
 | `VLLM_LOGGING_LEVEL` | `INFO` | 日志级别 |
-| `VLLM_KV_CACHE_LAYOUT` | 空 | `NHD`/`HND`，KV cache 内存布局 |
-| `VLLM_MM_HASHER_ALGORITHM` | `blake3` | 多模态内容哈希（FIPS 合规用 sha256/sha512） |
+| `VLLM_KV_CACHE_LAYOUT` | 空 | **v0.29 扩展**，KV cache 物理布局：`LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`（`NHD`/`HND` 为兼容旧名，见 02 §5.1） |
+| ~~`VLLM_MM_HASHER_ALGORITHM`~~（无此环境变量） | `blake3` | 多模态内容哈希（FIPS 合规用 sha256/sha512）——实为 `MultiModalConfig.mm_hasher_algorithm`（`vllm/config/multimodal.py:192`）/ CLI `--mm-hasher-algorithm`（`arg_utils.py:1406`） |
 | `VLLM_IMAGE_FETCH_TIMEOUT` / `VLLM_MAX_IMAGE_PIXELS` | `5` / ~179M | 多模态媒体抓取/解压炸弹防护 |
+| `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | **v0.29**，多模态媒体下载大小上限（MB） |
+| `VLLM_MAX_EMBED_DECODE_BYTES` | `2 GiB` | **v0.29**，embedding 解码字节上限（防 128K-token float32 等膨胀） |
 
 MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1024）、`VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE`、`VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL`（GB200 MNNVL）、`VLLM_MOE_SKIP_PADDING`（1）。KV 传输相关：`VLLM_NIXL_SIDE_CHANNEL_HOST/PORT`（5600）、`VLLM_P2P_SIDE_CHANNEL_HOST/PORT`（5710）、`VLLM_MOONCAKE_BOOTSTRAP_PORT`（8998）。
 
@@ -228,7 +235,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 - `max_num_batched_tokens`：单个 engine 迭代最多处理的 token 数（prefill+decode 合计预算）。
 - `max_num_seqs`：单迭代最多并发的序列数。
 
-默认值按硬件自动选择（`EngineArgs.get_batch_defaults`，`vllm/engine/arg_utils.py:2574`）：
+默认值按硬件自动选择（`EngineArgs.get_batch_defaults`，`vllm/engine/arg_utils.py:2717`）：
 
 | GPU | LLM 类 | API server |
 |---|---|---|
@@ -247,10 +254,10 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.2 显存管理
 <!-- tags: memory, 显存, gpu-memory-utilization, kv-cache, 量化 -->
 
-- `--gpu-memory-utilization`（`CacheConfig.gpu_memory_utilization`，默认 **0.92**，`vllm/config/cache.py:80`）：vLLM 实例占用的显存比例（权重+激活+KV cache）。OOM 时调低，吞吐不够时调高。
-- `--kv-cache-memory-bytes`：直接指定每 GPU KV cache 字节数，**设置后忽略 gpu_memory_utilization**，更精细。启动日志会打印建议值（`vllm/v1/worker/gpu_worker.py:794`），回灌可跳过 memory profiling 加速启动（文档中写作 `--kv-cache-memory`，代码中 flag 为 `--kv-cache-memory-bytes`）。
+- `--gpu-memory-utilization`（`CacheConfig.gpu_memory_utilization`，默认 **0.92**，`vllm/config/cache.py:103`）：vLLM 实例占用的显存比例（权重+激活+KV cache）。OOM 时调低，吞吐不够时调高。
+- `--kv-cache-memory-bytes`：直接指定每 GPU KV cache 字节数，**设置后忽略 gpu_memory_utilization**，更精细。启动日志会打印建议值（`vllm/v1/worker/gpu_worker.py:840-894`），回灌可跳过 memory profiling 加速启动（文档中写作 `--kv-cache-memory`，代码中 flag 为 `--kv-cache-memory-bytes`）。
 - `--kv-cache-dtype`（`CacheConfig.cache_dtype`）：`auto`/`fp8`/`fp8_e4m3`/`fp8_e5m2`/`nvfp4`/`turboquant_*`/`int8_per_token_head` 等。**FP8 KV cache 使 KV 显存减半、并发翻倍**，精度损失通常可接受（H100/H200/B 系列支持）。
-- 量化权重：`--quantization` 支持 `awq`/`gptq`/`gptq_marlin`/`awq_marlin`/`fp8`/`modelopt`/`modelopt_fp4`/`mxfp8`/`nvfp4`/`compressed-tensors`/`torchao` 等（`vllm/model_executor/layers/quantization/__init__.py:12`）。HF 上直接下量化好的 checkpoint 即可（如 RedHatAI 的 FP8 模型）；在线量化用 `fp8_per_tensor`/`fp8_per_block` 等 shorthand。
+- 量化权重：`--quantization` 支持 `awq`/`gptq`/`gptq_marlin`/`awq_marlin`/`fp8`/`modelopt`/`modelopt_fp4`/`mxfp8`/`nvfp4`/`compressed-tensors`/`torchao` 等（`vllm/model_executor/layers/quantization/__init__.py:15`，`QuantizationMethods`）。HF 上直接下量化好的 checkpoint 即可（如 RedHatAI 的 FP8 模型）；在线量化用 `fp8_per_tensor`/`fp8_per_block` 等 shorthand。
 - `--max-model-len`：限制上下文长度直接省 KV cache（长上下文是 KV 显存大头）。
 - `--enforce-eager` / 缩小 `cudagraph_capture_sizes`：省 cudagraph 占用的显存（`docs/configuration/conserving_memory.md`）。
 - `--cpu-offload-gb N`：权重 offload 到 CPU（牺牲速度换容量）；`--mm-processor-cache-gb`（默认 4）控制多模态预处理缓存。
@@ -259,7 +266,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.3 Prefix Caching
 <!-- tags: prefix-caching, 前缀缓存, hash, dp, 命中率 -->
 
-- `--enable-prefix-caching`（`CacheConfig.enable_prefix_caching`，默认 **True**，`cache.py:107`）：按 block（默认 `block_size=16`）哈希前缀，命中则跳过 prefill。多轮对话、RAG 长文档、few-shot 场景收益巨大（`docs/features/automatic_prefix_caching.md`）。
+- `--enable-prefix-caching`（`CacheConfig.enable_prefix_caching`，默认 **True**，`cache.py:130`）：按 block（默认 `block_size=16`）哈希前缀，命中则跳过 prefill。多轮对话、RAG 长文档、few-shot 场景收益巨大（`docs/features/automatic_prefix_caching.md`）。
 - 只省 prefill 不省 decode；无共享前缀的负载无收益。
 - `--prefix-caching-hash-algo`：`sha256`（默认）/`xxhash`（更快，多租户有碰撞风险）；
 - 与 DP 结合：内部 LB 按各 DP rank 的 running/waiting 队列分发，可配合外部路由让同前缀请求落同一 rank 提高命中率。
@@ -268,7 +275,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.4 并行策略选择（TP/PP/DP/EP）
 <!-- tags: parallel, 并行策略, tp, pp, dp -->
 
-`ParallelConfig`（`vllm/config/parallel.py:119`）字段：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`prefill_context_parallel_size`、`enable_expert_parallel`、`all2all_backend` 等。
+`ParallelConfig`（`vllm/config/parallel.py:124`）字段：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`prefill_context_parallel_size`、`enable_expert_parallel`、`all2all_backend` 等。
 
 决策规则（`docs/serving/parallelism_scaling.md`）：
 
@@ -287,7 +294,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 
 - `--enforce-eager`：完全禁用 torch.compile 和 cudagraph。启动最快、显存最省，但 decode 性能明显下降。**只在调试/测启动时间/显存紧张时用**。
 - 默认（`-O2`）：`CompilationMode.VLLM_COMPILE`（Inductor 后端 + piecewise 编译 + 自定义 pass）+ `CUDAGraphMode.FULL_AND_PIECEWISE`（`vllm/config/compilation.py:53`）。cudagraph 消除 decode 的 kernel launch 开销，小 batch 收益最大。
-- `-O0`~`-O3`（`VllmConfig.optimization_level`，默认 O2，`vllm/config/vllm.py:130`）：O0 无优化最快启动；O1 Dynamo+Inductor+PIECEWISE cudagraph；O2 加 FULL_AND_PIECEWISE；O3 目前等同 O2。
+- `-O0`~`-O3`（`VllmConfig.optimization_level`，默认 O2，`vllm/config/vllm.py:436`）：O0 无优化最快启动；O1 Dynamo+Inductor+PIECEWISE cudagraph；O2 加 FULL_AND_PIECEWISE；O3 目前等同 O2。
 - `--compilation-config`（或 `-cc.mode=3`、`-cc.cudagraph_capture_sizes=[1,2,4,8]`）：精细控制。`cudagraph_capture_sizes` 默认到 `max_num_seqs`；显存不够时截断（如 `[1,2,4,8,16]`）。
 - `--performance-mode interactivity`：小 batch 细粒度 capture（1..32 每个都抓），padding 开销最小，延迟最优。
 - 编译缓存：`VLLM_CACHE_ROOT/torch_compile_cache`，跨容器/机器可拷贝；任何模型/配置/相关 `VLLM_*` 环境变量/硬件变化都会使缓存失效（`envs.py:compile_factors()`）。
@@ -295,7 +302,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.6 Chunked Prefill 与 Continuous Batching
 <!-- tags: chunked-prefill, continuous-batching, 调度, async-scheduling, decode-priority -->
 
-- V1 中 **chunked prefill 默认开启**（`SchedulerConfig.enable_chunked_prefill=True`，`scheduler.py:74`）：长 prompt 按 `max_num_batched_tokens` 预算切块，与 decode 请求混批。
+- V1 中 **chunked prefill 默认开启**（`SchedulerConfig.enable_chunked_prefill=True`，`scheduler.py:117`）：长 prompt 按 `max_num_batched_tokens` 预算切块，与 decode 请求混批。
 - 调度策略：**decode 优先**——先排所有 pending decode，剩余预算再排 prefill。这同时改善了 ITL（decode 不被 prefill 阻塞）和 GPU 利用率（compute-bound prefill 与 memory-bound decode 互补）。
 - 长文本/混合负载影响：
   - 长 prompt 不再独占一个迭代 → TTFT 更可预测，不会把整批 decode 卡死；
@@ -355,7 +362,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 | 调度 | `--max-num-batched-tokens`、`--max-num-seqs`、`--max-num-scheduled-tokens`、`--long-prefill-token-threshold`、`--scheduling-policy`、`--async-scheduling`、`--watermark`、`--stream-interval` | 见 §4.1 |
 | 并行 | `--tensor-parallel-size`、`--pipeline-parallel-size`、`--data-parallel-size`、`--enable-expert-parallel`、`--all2all-backend`、`--distributed-executor-backend`、`--numa-bind` | 1/1/1 |
 | 编译 | `--optimization-level`、`--compilation-config`（`-cc.*`）、`--performance-mode` | O2 / balanced |
-| 投机解码 | `--speculative-config`（method/model/num_speculative_tokens，`vllm/config/speculative.py:85`） | 关 |
+| 投机解码 | `--speculative-config`（method/model/num_speculative_tokens，`vllm/config/speculative.py:375`） | 关 |
 | 结构化输出 | `--structured-outputs-config`（backend: xgrammar/guidance/outlines/lm-format-enforcer） | auto |
 | 可观测 | `--disable-log-stats`、`--otlp-traces-endpoint`、`--collect-detailed-traces`、`--kv-cache-metrics`、`--enable-mfu-metrics` | 关 |
 | 前端 | `--host`、`--port`、`--api-key`、`--api-server-count`、`--allowed-origins`、`--ssl-certfile`、`--root-path`、`--middleware` | 8000 |
