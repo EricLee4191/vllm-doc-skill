@@ -119,4 +119,4 @@ vllm serve Qwen/Qwen2.5-7B-Instruct \
 
 ## License
 
-内部知识库，未开源授权。
+[MIT License](LICENSE)
