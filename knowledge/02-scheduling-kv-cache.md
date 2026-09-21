@@ -1,6 +1,6 @@
 # 调度器与 KV Cache 管理
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（release candidate）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 总体架构
 <!-- tags: scheduler, overview, 调度器 -->
@@ -185,7 +185,7 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 | `BLHNC` / `BLNHC` / `BHLNC` | `B` 最外 | block-outermost（block 连续） |
 | `NHD` / `HND` | — | 旧名兼容（`NHD`≈`LBHNC`、`HND`≈`LBNHC`） |
 
-- 由 `VLLM_KV_CACHE_LAYOUT` 选择（`vllm/envs.py:1800`，取值 `LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`，默认 `None` 走平台/模型默认）。
+- 由 `VLLM_KV_CACHE_LAYOUT` 选择（`vllm/envs.py:1801`，取值 `LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`，默认 `None` 走平台/模型默认）。
 - 关键属性：`is_layer_compact`（L 最外）、`is_block_contiguous`（`[H,N,C]` 块内连续）、`is_block_compact`（每页字节连续）、`is_block_outermost`（B 最外）——backend 的 `validate_configuration` 与 kernel 据此判断能否实现。
 - `compute_layout_strides()` / `create_kv_cache_views()`（`kv_cache_interface.py`）按布局算 stride 并生成 per-layer 视图；`group_kernel_blocks()` 处理 kernel block 与物理 block 不一致的情况。
 - 动机：不同 attention backend（尤其 MLA sparse、HiSparse、DCP）对 KV 的物理排列要求不同，统一成枚举后 backend 只需声明所需布局，避免各处硬编码 `NHD/HND`。
@@ -215,6 +215,7 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 
 - `SimpleCPUOffloadScheduler`（`manager.py:134`）：从 GPU `KVCacheConfig` 派生 CPU 侧配置（`_derive_cpu_config`），维护 CPU 块池；对 full-attention group 做前缀匹配，产出 `SimpleCPUOffloadMetadata`（load/store 的 `gpu_block_ids ↔ cpu_block_ids` 映射）。
 - `SimpleCPUOffloadWorker`（`worker.py:26`）：独立 CUDA stream（`load_stream`/`store_stream`）异步 DMA（`copy_backend.py`），`cuda_mem_ops.py` 做 pinned memory 分配；`disk_backend.py` 支持落盘（`kv_offload_backend="disk"`、`disk_path`、`disk_buffer_slots`）。
+- **v0.30 修复**（#56810）：`SimpleCPUOffloadScheduler` 现在只把 `prefix_cacheable_group_ids` 里的 group 纳入 CPU 前缀匹配与水位计算（`manager.py` 用 `kv_cache_config.prefix_cacheable_groups`/`prefix_cacheable_group_ids`），跳过不可前缀缓存的 group（GLM-5.3-Flash kpool tail、QSA 等），避免对这类 group 做无意义的 offload/匹配。
 - 与 6.1 的区别：实现简单、面向单机 CPU/磁盘两级，无 tiering/p2p。
 
 ### 6.3 HiSparse（host-resident sparse-MLA decode，v0.29 实验性）
@@ -252,11 +253,12 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 | `kv_cache_dtype_skip_layers` | `CacheConfig:134` | 按层名/索引跳过 KV 量化 |
 | `num_gpu_blocks_override` | `CacheConfig:101` | 覆盖 profiled 块数（测试抢占） |
 | `mamba_block_size` / `mamba_cache_mode` / `mamba_cache_dtype` | `CacheConfig:145-157` | Mamba 状态块大小/缓存模式（all/align/none） |
+| `enable_mamba_shared_prefix_checkpoint`（CLI `--enable-mamba-shared-prefix-checkpoint`） | `CacheConfig:187` | **v0.30 更名**（原 `--enable-mamba-fine-grained-prefix-cache`，#57382）：在 EAGLE/MTP 兄弟请求 resume 的共享前缀 junction 处也注册 Mamba "align" checkpoint（默认只在 prompt 尾部），仅对 `mamba_cache_mode=align` 生效 |
 | `kv_offloading_size` / `kv_offloading_backend` | `CacheConfig:210-219` | KV offload 容量(GiB) / native|lmcache |
 | `disable_hybrid_kv_cache_manager` | `SchedulerConfig:122` | 混合模型按 full attention 统一分配 |
-| `VLLM_USE_SIMPLE_KV_OFFLOAD` | `envs.py:2157` | native offload 走 simple connector |
+| `VLLM_USE_SIMPLE_KV_OFFLOAD` | `envs.py:2158` | native offload 走 simple connector |
 | `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` | env | 是否把 cudagraph 显存计入 profile（默认开） |
-| `VLLM_KV_CACHE_LAYOUT` | `envs.py:1800` | **v0.29 扩展**，KV 物理布局（`LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`），见 §5.1 |
+| `VLLM_KV_CACHE_LAYOUT` | `envs.py:1801` | **v0.29 扩展**，KV 物理布局（`LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`），见 §5.1 |
 
 **调优要点**：
 - 吞吐：调大 `max_num_batched_tokens`（受显存/延迟权衡）；`max_num_seqs` 影响 batch 宽度。

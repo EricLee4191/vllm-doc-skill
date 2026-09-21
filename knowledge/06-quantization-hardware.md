@@ -1,6 +1,6 @@
 # 量化与多硬件平台
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的量化体系分两条主线：
@@ -83,7 +83,12 @@ vLLM 的量化体系分两条主线：
 - `TorchAOConfig`（min capability 75）：读 HF config 里的 torchao `config_dict`，支持 int8/int4/fp8 等多种 torchao recipe。
 - `INCConfig`（min capability 60）：Intel Neural Compressor，XPU/CPU 常见（W8A8、W4A16 等）。
 - `QuarkConfig`（min capability 70）：NVIDIA Quark 工具链产物。v0.30 起支持**原生 Quark W4A16 INT4/UINT4 导出**（#48606，`quark/schemes/quark_w4a16_int4.py`），此前 W4A16 需经其他格式中转。
-- `HummingConfig`（min capability 75）：Neural Magic 的混合精度格式（per-layer 不同量化 schema），linear 走 `HummingLinearKernel`，MoE 走 `HummingMoEMethod`。
+- `HummingConfig`（min capability 75）：Neural Magic 的混合精度格式（per-layer 不同量化 schema），linear 走 `HummingLinearKernel`，MoE 走 `HummingMoEMethod`。**v0.30 整合**（#56685）：
+  - 工具代码从单文件 `utils/humming_utils.py` 拆成 `utils/humming/` 包——`schema.py`（weight/input schema 解析，`BaseWeightSchema`/`BaseInputSchema` 及 AWQ/GPTQ/MXFP4/NVFP4/Modelopt 等子类）、`activation.py`、`linear.py`、`moe.py`；`vllm/utils/humming.py` 的 `_EXPORTS` 增补 `WeightScale2Type`/`InputQuantizationMode`/`MmaType`/`may_process_input`/`process_input` 等符号。
+  - 新增 `kernels/linear/mxfp6/humming.py`（`HummingMxFp6LinearKernel`），Humming 现覆盖 mxfp4/mxfp6/mxfp8/nvfp4/scaled_mm/mixed_precision 各 kernel 选择器。
+  - **fallback 语义收紧**：显式 input schema（checkpoint 或 `VLLM_HUMMING_INPUT_QUANT_CONFIG`）默认**禁用** kernel fallback，除非配置含 `"allow_fallback": true`（`HummingLayerQuantizationConfig.allow_input_schema_fallback`）。
+  - online-quant 的 Linear 层若 `input_size`/`input_size_per_partition` 非 32 对齐则回退 `UnquantizedLinearMethod`。
+  - **共享持久 workspace**（#57421）：Marlin 与 Humming 的 MoE/linear 持久 scratch 现由 `WorkspaceManager.get_persistent_resource`/`get_persistent`（`vllm/v1/worker/workspace.py`）统一管理——按 (ubatch, lane) 缓存、lock 后禁止新增，避免各 kernel 各自分配。
 
 **在线量化（online/，`OnlineQuantizationConfig`，min capability 75）**
 - 无需预量化 checkpoint：加载 BF16/FP16 权重时逐层量化。`--quantization` 的 shorthand 在 `vllm/config/quantization.py:187` 的 `_ONLINE_SHORTHANDS`：

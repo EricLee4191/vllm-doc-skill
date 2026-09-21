@@ -1,6 +1,6 @@
 # 模型执行与编译优化
 
-> 版本：基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 版本：基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的"模型执行层"由三层组成：
@@ -18,7 +18,7 @@ vLLM 的"模型执行层"由三层组成：
 
 v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vllm_config.use_v2_model_runner` 二选一：
 
-- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:185`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，`gpu/model_runner.py:1750` 附近），此前 microbatched 步只能 eager/piecewise。
+- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:186`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，`gpu/model_runner.py:1756` 附近），此前 microbatched 步只能 eager/piecewise。
 - **Model Runner V1（legacy，回退用）**：`vllm/v1/worker/gpu_model_runner.py:496`（约 7700 行）。下文 §1.1/§1.2 的详细行号锚点仍以 V1 为准（V2 的方法名/流程一致，但行号不同）。
 
 `VllmConfig.use_v2_model_runner`（`vllm/config/vllm.py:694`）的判定优先级：
@@ -29,6 +29,8 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 5. 无 Triton → 回退 V1；
 6. `_get_v2_model_runner_unsupported_features()` 命中未支持特性 → 回退 V1；
 7. 否则默认 **V2**。
+
+> **v0.30 变更（#56497）**：自定义 logits processors（`model_config.logits_processors` / `vllm.logits_processors` entry-point 插件）**不再**列入 V2 不支持特性——`_get_v2_model_runner_unsupported_features` 已移除该检查，V2 通过 `vllm/v1/worker/gpu/sample/logits_processor/`（`interface.py` 的 `LogitsProcessor` 协议 + `loader.py` 的 `build_custom_logits_processors`/`build_custom_logits_processors_params_validator`）原生支持。参数校验从 `SamplingParams._validate_logits_processors` 上移到 `InputProcessor`（准入时按 runner 选 validator）。
 
 核心类（V1 描述，V2 结构等价）持有：
 - `self.model`（`nn.Module`，由 `load_model` 加载并可能包上 CUDA Graph wrapper）
@@ -285,7 +287,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ### 6.4 Encoder CUDA Graph（`vllm/v1/worker/encoder_cudagraph.py`）
 <!-- tags: encoder-cudagraph, 多模态, vision, capture, 启动开销 -->
 
-多模态 vision encoder 的 budget-batch 执行也支持 CUDA graph capture（`encoder_cudagraph_defs.py` 定义 capture 参数），减少 MM 负载下 encoder forward 的 launch 开销。
+多模态 vision encoder 的 budget-batch 执行也支持 CUDA graph capture（`encoder_cudagraph_defs.py` 定义 capture 参数），减少 MM 负载下 encoder forward 的 launch 开销。通过 `--compilation-config '{"cudagraph_mm_encoder": true}'` 启用，manager（`encoder_cudagraph.py`）负责 budget packing、DP 分片与 eager fallback；模型侧实现 `SupportsEncoderCudaGraph` 协议（`model_executor/models/interfaces.py`）。**v0.30 新增**：DeepSeek-V4.1-flash 视觉塔支持 encoder CUDA graph（#56625，`models/deepseek_v41/common/vl_cudagraph.py`，390 行 mixin）——整批 image 打包成一次 varlen run（ViT block 按 `cu_seqlens` 逐图 attend，aligner 的 spatial merge 变成对预计算索引的 gather+mask），span 组装（IMAGE_START/NEW_LINE/END）仍 eager 但跨整批 batched。
 
 ---
 
@@ -294,7 +296,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 
 - **`vllm/v1/sample/`**：采样逻辑独立成目录——`sampler.py`（`Sampler.forward`，:73）、`rejection_sampler.py`（spec decode 的 rejection sampling）、`logits_processor/`（bad words / logit bias 等）、`thinking_budget_state.py`（reasoning budget 跟踪）。`GPUModelRunner.sample_tokens`（:4667）仍是入口，但具体采样实现委托此目录。
 - **`vllm/v1/fault_tolerance/`**：`EngineCoreSentinel`（`engine_core_sentinel.py`）——EngineCore 进程的哨兵/容错包装，通过 `FT_STATUS_CALL_ID` utility 调用上报 `EngineStatusType`，支持 engine core 故障检测与进程组无状态重建（`stateless_init/destroy_torch_distributed_process_group`），为弹性恢复（Elastic EP 等）提供基础。
-- **Model Runner V2**（`vllm/v1/worker/gpu/`）：重构版 runner（`model_runner.py` + `input_batch/`、`sample/`、`spec_decode/`、`warmup.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等子模块），按功能拆分 `gpu_model_runner.py` 的巨石结构。**v0.29 起为默认 runner**（`use_v2_model_runner` 默认 True，见 §1），旧版 `gpu_model_runner.py` 降为 legacy 回退路径（`VLLM_USE_V2_MODEL_RUNNER=0`）。V2 还承载了 HiSparse、watermarking 等新特性（这些特性强制要求 V2）。
+- **Model Runner V2**（`vllm/v1/worker/gpu/`）：重构版 runner（`model_runner.py` + `input_batch/`、`sample/`、`spec_decode/`、`warmup.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等子模块），按功能拆分 `gpu_model_runner.py` 的巨石结构。**v0.29 起为默认 runner**（`use_v2_model_runner` 默认 True，见 §1），旧版 `gpu_model_runner.py` 降为 legacy 回退路径（`VLLM_USE_V2_MODEL_RUNNER=0`）。V2 还承载了 HiSparse、watermarking、自定义 logits processors 等新特性（前两者强制要求 V2）。**v0.30 性能**（#57416）：prefill-only batch（无 draft token）现在按 `model_state.num_new_sampled_tokens_per_step`（k）分配 logit 行，而非假设 k=1，避免多 token 模型（如 diffusion）的 logit 行错配。
 
 ---
 

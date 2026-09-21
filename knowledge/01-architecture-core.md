@@ -1,6 +1,6 @@
 # 核心架构与请求生命周期
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19）源码，最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21）源码，最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
 
 ## 1. v1 与旧版 (v0) 引擎
 <!-- tags: v1, engine, 引擎 -->
@@ -235,7 +235,7 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 
 - `LLM` 构造时 `disable_log_stats=True`（`llm.py:228`），并禁止单进程 `data_parallel_size>1`（`llm.py:283`，会挂起）。
 - `AsyncLLM` 支持 streaming input（`AsyncGenerator[StreamingInput]`，`async_llm.py:458`）、`data_parallel_rank` 路由、reasoning parser 等在线特性。
-- 两者都通过 `InputProcessor`（`v1/engine/input_processor.py:38`）把 prompt 转 `EngineCoreRequest`，通过 `OutputProcessor`（`v1/engine/output_processor.py:464`）把 `EngineCoreOutput` 转 `RequestOutput`。区别只在 `OutputProcessor` 是否带 per-request 队列（`RequestOutputCollector`）。
+- 两者都通过 `InputProcessor`（`v1/engine/input_processor.py:39`）把 prompt 转 `EngineCoreRequest`，通过 `OutputProcessor`（`v1/engine/output_processor.py:464`）把 `EngineCoreOutput` 转 `RequestOutput`。区别只在 `OutputProcessor` 是否带 per-request 队列（`RequestOutputCollector`）。`InputProcessor` 还在构造时加载自定义 logits processor 类并缓存 per-request 参数校验器（`_build_logits_processors_params_validator`，#56497），准入时按 V1/V2 runner 分别走 `validate_logits_processors_parameters` 或 `build_custom_logits_processors_params_validator`。
 
 ## 7. 关键文件
 <!-- tags: files -->

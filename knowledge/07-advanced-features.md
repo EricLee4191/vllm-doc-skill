@@ -1,6 +1,6 @@
 # 投机解码与高级推理特性
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（release candidate）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 本文覆盖 vLLM 的高级特性：**投机解码 (speculative decoding)**、**采样 (sampling)**、**结构化输出 (structured output)**、**LoRA 多适配器**、**多模态 (multimodal)**、**reasoning/思考模型支持**，以及 v0.29 新增的**文本水印 (watermarking)** 与 **Engram/PLE（n-gram 嵌入存储）**。重点讲架构与部署/调优旋钮。
 
@@ -138,6 +138,8 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 **per-request 接受率指标（v0.28 新增，#48915）**：除全局日志外，每个请求的接受率统计（`num_draft_tokens`/`num_accepted_tokens`/per-position 接受率）现在会随 OpenAI API 响应返回（`docs/features/speculative_decoding/acceptance_metrics.md`），便于按请求观测投机解码收益；Rust frontend 的 `EngineCoreOutput` 协议也带上了这些字段。
 
+**generate API 暴露 per-request 投机解码指标（v0.30 新增，#43310）**：Rust frontend 的 `/inference/v1/generate`（`GenerateResponse`/`GenerateStreamResponse`，`rust/src/server/src/routes/inference/generate/`）新增 `metrics.speculative_decoding` 字段，由 `RequestSpecDecodeMetrics` 推导：`mean_acceptance_length`（=1+accepted/spec_steps）、`draft_acceptance_rate`、`acceptance_histogram`、`num_spec_steps`/`num_accepted_draft_tokens`/`num_draft_tokens`/`num_spec_tokens`，以及可选的 `per_step_accepted`/`per_step_drafted`（仅 detailed 模式）。流式响应（`StreamingSpeculativeDecodingMetrics`）在请求 summary 指标时省略 detailed 字段。Python `GenerateResponse` 与 scale-out（`token_in_token_out`/`derender`）端点同步透传。
+
 ---
 
 ## 2. 采样 (Sampling)
@@ -159,6 +161,8 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 **Logits processors**（`vllm/v1/sample/logits_processor/`）：`MinPLogitsProcessor`、`LogitBiasLogitsProcessor`、`MinTokensLogitsProcessor`（`builtin.py`），通过 `is_argmax_invariant()` 区分是否影响 greedy。`SamplingMetadata`（`vllm/v1/sample/metadata.py`）携带每 batch 的 temperature/top_p/top_k/penalties/generators/`spec_token_ids`/`thinking_budget_state_holder`。
 
+**自定义 logits processors（v0.30 起 V2 也支持，#56497）**：用户自定义 processor 经 `model_config.logits_processors`（类路径列表）或 `vllm.logits_processors` entry-point 插件注册。V1 走 `vllm/v1/sample/logits_processor/`；**Model Runner V2** 走新增的 `vllm/v1/worker/gpu/sample/logits_processor/`（`interface.py` 定义 `LogitsProcessor` 协议 + `is_argmax_invariant`，`loader.py` 负责按 runner 加载类并构建 per-request 参数校验器）。参数校验从 `SamplingParams._validate_logits_processors` 上移到 `InputProcessor`（`vllm/v1/engine/input_processor.py`，准入时按 `use_v2_model_runner` 选 validator），`_get_v2_model_runner_unsupported_features` 不再把 "custom logits processors" 列为 V2 不支持项。
+
 ### 2.2 SamplingParams 字段
 <!-- tags: sampling-params, 字段, 采样参数, beam-search -->
 
@@ -167,7 +171,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 - logprobs：`logprobs`、`prompt_logprobs`、`logprob_token_ids`（generative_scoring 用，只取指定 token 的 logprob）、`flat_logprobs`。
 - `structured_outputs`（`StructuredOutputsParams`）、`logit_bias`、`allowed_token_ids`、`bad_words`、`thinking_token_budget`、`repetition_detection`。
 
-**beam search**：`SamplingParams` 仍保留 `beam_width` 字段（`sampling_params.py:1305`，"not supported by OpenAI"），但 v1 引擎没有 beam search 实现（`vllm/v1/` 下无 `beam_search` 代码）——beam search 属于已废弃的 V0 路径，v1 不支持。
+**beam search**：`SamplingParams` 仍保留 `beam_width` 字段（`sampling_params.py:1297`，"not supported by OpenAI"），但 v1 引擎没有 beam search 实现（`vllm/v1/` 下无 `beam_search` 代码）——beam search 属于已废弃的 V0 路径，v1 不支持。
 
 ---
 
@@ -179,7 +183,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 `StructuredOutputManager`（`vllm/v1/structured_output/__init__.py:36`）是 engine 级单例，管理一个 backend（V1 不支持 per-request 切换 backend）。
 
-- **backend 选择**：`StructuredOutputsConfig.backend`（`config/structured_outputs.py:21`）默认 `"auto"`。`auto` 模式在 `sampling_params.py:1199-1244`（`_validate_structured_outputs` 的 auto 分支）里按优先级尝试：先 `xgrammar`，失败则 `guidance`（Mistral 非 tekken tokenizer 或 schema 含 guidance 不支持特性时退到 `outlines`）。
+- **backend 选择**：`StructuredOutputsConfig.backend`（`config/structured_outputs.py:21`）默认 `"auto"`。`auto` 模式在 `sampling_params.py:1191-1236`（`_validate_structured_outputs` 的 auto 分支）里按优先级尝试：先 `xgrammar`，失败则 `guidance`（Mistral 非 tekken tokenizer 或 schema 含 guidance 不支持特性时退到 `outlines`）。
 - **backend 实现**：
   - `XgrammarBackend`（`backend_xgrammar.py:37`）：默认。`xgr.GrammarCompiler` + `GrammarMatcher`，`compile_grammar` 支持 `JSON`/`JSON_OBJECT`/`GRAMMAR`/`REGEX`/`STRUCTURAL_TAG`。
   - `GuidanceBackend`（`backend_guidance.py`）、`OutlinesBackend`（`backend_outlines.py`，SQLite 磁盘缓存 `OUTLINES_CACHE_DIR`）、`LMFormatEnforcerBackend`（`backend_lm_format_enforcer.py`）。
@@ -202,7 +206,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 - `--structured-outputs-config`（JSON，含 `backend`/`disable_any_whitespace`/`disable_additional_properties`/`reasoning_parser`/`reasoning_parser_plugin`/`enable_in_reasoning`）。
 - `--reasoning-parser`、`--reasoning-parser-plugin`（`arg_utils.py:1051-1055`）。
-- 环境变量 `VLLM_XGRAMMAR_CACHE_MB`（默认 512，`envs.py:1643`）控制 xgrammar 编译缓存；`OUTLINES_CACHE_DIR` 控制 outlines 磁盘缓存。
+- 环境变量 `VLLM_XGRAMMAR_CACHE_MB`（默认 512，`envs.py:1644`）控制 xgrammar 编译缓存；`OUTLINES_CACHE_DIR` 控制 outlines 磁盘缓存。
 - 请求级：`response_format`（OpenAI）/ `structured_outputs`（`json`/`regex`/`choice`/`grammar`/`json_object`/`structural_tag`）。
 
 ---
@@ -337,7 +341,8 @@ CLI（`vllm/engine/arg_utils.py`）：
 **采样**
 - `vllm/v1/sample/sampler.py` — `Sampler`
 - `vllm/v1/sample/ops/{topk_topp_sampler,penalties,bad_words,logprobs}.py` — 采样 kernel
-- `vllm/v1/sample/logits_processor/{builtin,interface,state}.py` — logits processors
+- `vllm/v1/sample/logits_processor/{builtin,interface,state}.py` — logits processors（V1）
+- `vllm/v1/worker/gpu/sample/logits_processor/{interface,loader}.py` — 自定义 logits processors（Model Runner V2，v0.30 新增 #56497）
 - `vllm/v1/sample/metadata.py` — `SamplingMetadata`
 - `vllm/v1/sample/thinking_budget_state.py` — thinking budget
 - `vllm/sampling_params.py` — `SamplingParams` / `StructuredOutputsParams`

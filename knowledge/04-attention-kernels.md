@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 
@@ -108,6 +108,7 @@ MLA（DeepSeek 系列）的 KV cache 存 latent（`kv_c` + `k_pe`），backend �
 - **TRITON_MLA**（`mla/triton_mla.py`）：Triton 实现，通用兜底，SM120 首选。
 - **FLASH_ATTN_MLA**（`mla/flashattn_mla.py`）：用 vllm_flash_attn 做 MLA。
 - **Sparse MLA**：`FLASHMLA_SPARSE`、`FLASHINFER_MLA_SPARSE`、`FLASH_ATTN_MLA_SPARSE` 等，配合 indexer（`mla/indexer.py` 的 `DeepseekV32IndexerBackend`）做 top-k 稀疏。
+  - **v0.30 加固**：sparse indexer 的 top-k 统一走共享 dispatcher `SparseIndexerTopk`（`model_executor/layers/indexer_topk.py`，GLM-5.3-Flash kpool indexer 也接入，#57546）——`auto` 模式在 `AUTO_COOPERATIVE_MAX_ROWS=64` 行以内优先 `cooperative_topk`，超出回退 `persistent_topk`（`deep_select`/`flashinfer`/`torch` 为显式 opt-in）。`sparse_attn_indexer`（`model_executor/layers/sparse_attn_indexer.py`）对 ragged decode batch（`num_decode_tokens % num_seqs != 0`）改走 padded 路径（#52500），避免 SM120 TP=2 下 uniform reshape 崩溃。SM100 `fp8_ds_mla` cache scales 修复（#49435，`csrc/libtorch_stable/cache_kernels.cu` + `kimi_k3`/`deepseek_v32` key-concat kernel）。
 
 **MLA prefill 后端**独立选择（`mla/prefill/selector.py`），`MLAPrefillBackendEnum`：`FLASH_ATTN` / `FLASHINFER` / `TRTLLM_RAGGED` / `TOKENSPEED_MLA` / `ROCM_AITER_FA` / `CPU_NATIVE`。优先级（`_get_mla_prefill_backend_priorities`）：SM100 且 DSV3 维度（192/64/256）时 `TRTLLM_RAGGED` 优先；否则 `FLASH_ATTN` 优先。可用 `AttentionConfig.mla_prefill_backend` 显式指定。
 
@@ -133,7 +134,7 @@ CUDA kernel 集中在 `csrc/libtorch_stable/`（libtorch stable ABI，注册到 
 - `csrc/libtorch_stable/attention/dcp_utils/` — decode context parallelism 的 LSE reduce / KV gather / Q gather（`dcp_direct_a2a_lse_reduce.cu` 等）。注：原 `vllm/v1/attention/ops/dcp_alltoall.py` 已删除，CP/DCP 的 attention ops 在 #52839 中整合进 `csrc` 侧（`VLLM_USE_DIRECT_DCP_A2A/Q_GATHER/KV_GATHER` 控制 direct 路径）。
 - `csrc/attention/attention_generic.cuh` + `attention_dtypes.h` — 从 FasterTransformer 移植的通用 paged-attention 模板（dtype 特化 `dtype_{float16,bfloat16,float32,fp8}.cuh`），主要供 ROCm/legacy 路径引用。
 - `csrc/rocm/attention.cu` — ROCm 原生 attention kernel。
-- **MLA KV 写入**：`concat_and_cache_mla` / `concat_and_cache_mla_grouped` / `concat_and_cache_mla_rope_fused`（`_custom_ops.py:2821/2823/2876`），把 `kv_c`+`k_pe` 拼接送入 MLA cache（可融合 RoPE、支持 FP8）。
+- **MLA KV 写入**：`concat_and_cache_mla` / `concat_and_cache_mla_grouped` / `concat_and_cache_mla_rope_fused`（`_custom_ops.py:2823/2836/2889`），把 `kv_c`+`k_pe` 拼接送入 MLA cache（可融合 RoPE、支持 FP8）。
 
 ### 5.3 KV cache 管理 kernel
 <!-- tags: kv-cache, kernels, reshape-and-cache, swap, gather -->
@@ -233,7 +234,7 @@ Triton kernel 分布在三处：
 ### 7.3 相关环境变量（`vllm/envs.py`）
 <!-- tags: env-vars, 环境变量, kv-layout, flashinfer, rocm -->
 
-- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1800`）。
+- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1801`）。
 - `VLLM_BATCH_INVARIANT` — 批不变模式（影响 backend 选择，如 FlexAttention 默认 block 16；MLA/Mamba 需支持 batch invariance）。
 - `VLLM_USE_FLASHINFER_SAMPLER`（默认 True）— 采样用 FlashInfer。
 - `VLLM_USE_FLASHINFER_MOE_INT4` — FlashInfer INT4 MoE。

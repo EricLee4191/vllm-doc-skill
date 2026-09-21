@@ -1,6 +1,6 @@
 # vLLM 知识库总览
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
 
 ## 1. vLLM 是什么
 <!-- tags: intro, overview, 简介 -->
@@ -219,10 +219,22 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
   - **调度器 RUNNING 准入上限**：`SchedulerConfig.max_num_active_seqs`（`--max-num-active-seqs`，`vllm/config/scheduler.py:70`，`vllm/v1/core/sched/scheduler.py:129`，执行点 `vllm/v1/core/sched/scheduler.py:872-874`）；队列上限计数改用 `SharedAdmissionStats`（`vllm/v1/engine/admission_control.py:13`）跨进程无锁计数。详见 02 §2.2。
   - **投机解码自适应验证**：`enable_adaptive_verification`（`vllm/config/speculative.py:539`）+ `OnlineAcceptanceEstimator`（`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py:313`，501 行，log-odds 线性模型，Triton accumulate/refit/predict kernels）。详见 07 §1.3。
   - **KV offload 增强**：back-pressure（#50045，`vllm/v1/kv_offload/tiering/backpressure.py`）、KVCR（#53624，`vllm/v1/kv_offload/tiering/kvcr/`）、per-request `max_load_tokens`（#55885，`vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:367`）、chunked region 注册（#51081）、cgroup 检查（#54014）、MLA compact（#56799）。详见 02 §6.1。
-  - **Model Runner V2**：DBO FULL CUDA graph（#51700，`vllm/v1/worker/gpu/model_runner.py:1750`）；Fast Start 支持 nnode>1（#55468）。详见 03。
+  - **Model Runner V2**：DBO FULL CUDA graph（#51700，`vllm/v1/worker/gpu/model_runner.py:1756`）；Fast Start 支持 nnode>1（#55468）。详见 03。
   - **分布式**：MoonEP BF16 all2all backend（#52101，`vllm/model_executor/layers/fused_moe/prepare_finalize/moonep.py`）；DeepEPv2 async finalize（#52781/#57236）；PCP+DCP on sparse-MLA（#56157）；PCP decode-only FULL CUDA graphs（#53867）；NIXL attention-HMA PP push prefill（#50494）；Elastic EP CUDA graph 复用（#54985）。详见 05。
   - **Attention**：新增 `COMPOSITE` backend（`vllm/v1/attention/backends/composite.py`，Triton/FlashInfer 或 Triton/FlashAttention 组合，用于 multimodal prefix attention `mm_prefix`，selector 在 `use_mm_prefix=True` 时自动选择）。详见 04 §4.1。
   - **量化**：Quark 原生 W4A16 INT4/UINT4（#48606，`vllm/model_executor/layers/quantization/quark/schemes/quark_w4a16_int4.py`）；CPU FP8 W8A8 linear/MoE（#49942，`csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp` + `moe_fp8_w8a8.cpp`）。详见 06。
   - **部署**：新增 `POST /release_kv_cache_memory` 端点（#44890，`vllm/entrypoints/serve/dev/sleep/api_router.py:31`）；`--enable-scale-out` CLI flag 取代 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（#55176，`vllm/entrypoints/scale_out/factories.py:72`）。详见 08。
   - **结构化输出重构**：`should_fill_bitmask`/`should_advance` 移除，改用 `_get_constraint_start`（`vllm/v1/structured_output/__init__.py:220`）/`validate_tokens`（`vllm/v1/structured_output/__init__.py:294`）；调度器 grammar 验证迁移到 `structured_output_manager.validate_tokens`（`vllm/v1/core/sched/scheduler.py:2526`）。详见 07。
   - **Engram**：新增 `embedding_across_dp`/`dp_shared_memory` 字段 + 异步预取 + DP 分片（#56512）。详见 07 §7.2。
+- **2026-09-20**：基线从 `751f6807d9`（2026-09-19，v0.30.0rc2）推进到 `4868312128`（2026-09-20，最新 tag 仍为 **v0.30.0rc2**，`fa6ff06066`）。区间 30 commits。主要变更：
+  - **Humming 特性整合**（#56685）：`utils/humming_utils.py` 拆成 `utils/humming/` 包（`schema.py`/`activation.py`/`linear.py`/`moe.py`），新增 `mxfp6/humming.py` kernel 与 `WeightScale2Type`/`InputQuantizationMode`/`MmaType` 等 schema 类型；显式 input schema 默认禁用 fallback（`allow_fallback` 控制）；Marlin 与 Humming 共享持久 workspace（#57421，`vllm/v1/worker/workspace.py` 新增 `get_persistent_resource`/`get_persistent`）。详见 06。
+  - **Model Runner V2 支持自定义 logits processors**（#56497）：`vllm/v1/worker/gpu/sample/logits_processor/`（`interface.py`/`loader.py`）新增，`_get_v2_model_runner_unsupported_features` 移除 "custom logits processors" 限制；`InputProcessor` 在准入时按 runner 选 validator。详见 03/07。
+  - **`--enable-mamba-fine-grained-prefix-cache` 更名**（#57382）→ `--enable-mamba-shared-prefix-checkpoint`（`CacheConfig.enable_mamba_shared_prefix_checkpoint`，`config/cache.py:187`），语义不变（EAGLE/MTP 共享前缀 junction 处注册 Mamba align checkpoint）。详见 02。
+  - **generate API 暴露 per-request 投机解码指标**（#43310）：Rust frontend `GenerateResponse`/`GenerateStreamResponse` 新增 `metrics.speculative_decoding`（`mean_acceptance_length`/`draft_acceptance_rate`/`acceptance_histogram`/`per_step_*` 等）。详见 07/08。
+  - **EPD 动态注册**（#54176）：`disagg_epd_proxy.py` 支持 `--dynamic-registration`，通过 `POST/DELETE /instances`（`X-API-Key`）在线注册/摘除 encode/prefill/decode 实例，带健康探测与自动重连。详见 05。
+  - 其他：DeepSeek-V4.1-flash encoder CUDA graph（#56625，`models/deepseek_v41/common/vl_cudagraph.py`）；MiMo V2 bf16 MoE router + mxfp4 MoE（#57784，`GateLinear`）；GLM-5.3-Flash kpool/sparse-indexer 系列修复与性能（#57546/#57534/#57477/#57701/#56810）；SM100 fp8_ds_mla cache scales 修复（#49435）；dead kernel code 清理（#57621，-559 行）。详见 02/04/06。
+- **2026-09-21**：基线从 `4868312128`（2026-09-20，v0.30.0rc2）推进到 `86ce4d10e2`（2026-09-21，最新 tag 仍为 **v0.30.0rc2**，`fa6ff06066`）。区间 11 commits。主要变更：
+  - **Profiler 统一为平台感知**（#57460）：torch profiling 逻辑从各 worker（`gpu_worker.py`/`cpu_worker.py`/`xpu_worker.py` 各删 22~41 行）收敛到 `vllm/profiler/wrapper.py` 工厂 `create_worker_profiler`（:675）；`ProfilerConfig` 新增 `torch_profiler_activities`（`config/profiler.py:55`，`CPU`/`CUDA`/`PrivateUse1`/`XPU`，缺省按平台默认）；`WorkerProfiler` 基类新增 `should_annotate` 属性（`wrapper.py:60`）。详见 08 §4.9。
+  - **sleep 时 KV connector cache reset 失败上抛**（#54581）：`EngineCore` 的 `reset_prefix_cache` 返回 False 时抛 `RuntimeError`（`vllm/v1/engine/core.py:874`），`pause_generation` 的 idle callback 异常经 future 传播而非吞掉。
+  - **MoRIIO KV connector 大改**（#51052，+2746 行）：READ 模式传输 hybrid mamba/KDA recurrent state，`moriio_connector.py`/`moriio_layout.py` 重写。
+  - 其他：spec decode dummy draft 步不再经 stale block-table 行写 KV（#56734，`vllm/v1/worker/gpu/spec_decode/speculator.py`）；DSV4.1 mHC 小 TP batch 系数 overlap（#57603）；ROCm Engram 表留 host 内存（#57491）；HY4 full CUDA graph capture 记录 indexer completion event（#57811）；XPU communicator world_size 可见性修复（#57779）；Kthena/EPD 文档更新。详见 02/03/06/07。

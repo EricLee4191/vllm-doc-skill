@@ -1,6 +1,6 @@
 # 分布式并行（TP/PP/DP/EP）与 KV 传输
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（release candidate）（V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 > 核心目录：`vllm/distributed/`、`vllm/config/parallel.py`、`vllm/v1/executor/`、`vllm/v1/worker/`。
 
 ---
@@ -385,6 +385,11 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - 方法：`register_caches`/`start_load_caches`/`save_caches`/`get_finished`/`has_cache_item`。
 - 工厂 `ECConnectorFactory`（`ec_connector/factory.py`），配置 `ECTransferConfig`（`vllm/config/ec_transfer.py`：`ec_connector`/`ec_role`(ec_producer/ec_consumer/ec_both)/`ec_rank`/`ec_buffer_device`）。
 - 集成：`ec_transfer_state.py::ensure_ec_transfer_initialized`、`vllm/v1/worker/ec_connector_model_runner_mixin.py`、`Executor` 的 `ECOutputAggregator`。
+- **v0.30 新增：EPD 动态注册**（#54176，`examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py`）：E/P/D（encoder/prefill/decode）分离的 EC-connector proxy 现在支持 `--dynamic-registration`，外部 launcher 通过 HTTP 在线注册/摘除实例，无需改 vLLM 配置或 worker 注册线程：
+  - 控制面 API（需 `ADMIN_API_KEY`，以 `X-API-Key` 头传递，**勿公开暴露**）：`POST /instances`（`{"role":"encode|prefill|decode|prefill_decode","url":...}`，Mooncake 另需 `ec_zmq_addrs`/`dp_size`）、`GET /instances`、`DELETE /instances?url=...`。注册幂等。
+  - 拓扑由 role 决定：`encode`+`prefill_decode` → E+PD；`encode`+`prefill`+`decode` → E+P+D；standalone `decode` 必须有可用 `prefill`，否则 503。禁止混合 combined PD 与 standalone P/D。
+  - 健康探测：每 `--probe-interval`（默认 5s）探测，`--probe-timeout`（默认 2s），连续 `--fail-threshold`（默认 3）次失败即停发新请求；健康实例自动重新加入，不可达实例 `--evicted-ttl`（默认 900s）后遗忘。摘除只停新路由，已路由请求保留端点（先 drain 再停实例）。
+  - 示例脚本 `disagg_1e1pd_example.sh`/`disagg_1e1p1d_example.sh` 设 `DYNAMIC_REGISTRATION=1` + `ADMIN_API_KEY` 走动态流程，默认仍静态路由。
 
 ### 9.2 Weight Transfer（权重传输）
 <!-- tags: weight-transfer, 权重传输, rlhf, nccl, ipc, sharded-rdt -->

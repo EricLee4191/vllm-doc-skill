@@ -1,6 +1,6 @@
 # 部署、API 服务与性能调优
 
-> 基于 vLLM main（`751f6807d9`，2026-09-19），最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 部署形态总览
 <!-- tags: deployment, serve, docker, offline, api-server, 部署 -->
@@ -128,7 +128,7 @@ docker run --rm --gpus all \
 | `POST /v1/audio/transcriptions`、`/v1/audio/translations` | ASR（Whisper 类模型） | `entrypoints/speech_to_text/*/api_router.py` |
 | `POST /v1/messages`、`/v1/messages/count_tokens` | **Anthropic 兼容** | `entrypoints/anthropic/api_router.py` |
 | `POST /cohere/v2/chat` | Cohere 兼容（`VLLM_ENABLE_COHERE_API=1` 开启） | `entrypoints/cohere/api_router.py` |
-| `POST /inference/v1/generate`、`/abort_requests` | vLLM 原生 token-in/token-out 接口 | `entrypoints/scale_out/token_in_token_out/api_router.py` |
+| `POST /inference/v1/generate`、`/abort_requests` | vLLM 原生 token-in/token-out 接口；**v0.30 起响应带 `metrics.speculative_decoding`**（per-request 投机解码接受率：`mean_acceptance_length`/`draft_acceptance_rate`/`acceptance_histogram`/`per_step_*`，#43310） | `entrypoints/scale_out/token_in_token_out/api_router.py` |
 | `POST /v1/chat/completions/render`、`/v1/messages/render`、`/v1/completions/render`、`/v1/responses/render` | **scale-out render**（v0.29，把请求渲染成 token 序列，供外部 token-in 服务消费） | `entrypoints/scale_out/render/api_router.py` |
 | `POST /v1/chat/completions/derender`、`/v1/completions/derender` | **scale-out derender**（token 序列还原成响应；v0.30 起流式返回 reasoning + tool calls，#50550） | `entrypoints/scale_out/derender/api_router.py` |
 | `POST /release_kv_cache_memory` | **v0.30 新增**（#44890）：释放 KV cache 显存（sleep 场景），dev 路由 | `entrypoints/serve/dev/sleep/api_router.py:31` |
@@ -347,6 +347,18 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 - TTFT 高：长 prompt 排队 → 提高 `max_num_batched_tokens`；prefix 复用差 → 开/查 prefix caching；
 - ITL 高：batch 太大 → 降 `max_num_seqs`；cudagraph 未命中（batch 超出 capture sizes）→ 检查 `cudagraph_capture_sizes`；
 - 用 `vllm bench serve` 分别看 TTFT/TPOT/ITL 的 P50/P99 定位（§6）。
+
+### 4.9 Profiling（torch / CUDA / Proton）
+<!-- tags: profiling, torch-profiler, proton, profile, 性能分析, 火焰图 -->
+
+`ProfilerConfig`（`vllm/config/profiler.py:38`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1752`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:21`）或离线 `LLM.start_profile()/stop_profile()`。
+
+- **架构（v0.30.0rc2 统一后）**：profiler 创建/分发收敛在 `vllm/profiler/wrapper.py` 的工厂 `create_worker_profiler`（:675），各 worker（`gpu_worker.py:1281` 等）在 `profile()` 时懒创建 wrapper；平台差异（CUDA/XPU/CPU activity 映射）由 wrapper 内部按 `current_platform` 处理，worker 侧不再各自实现（#57460，此前 `cpu_worker.py`/`xpu_worker.py` 各有一份重复代码）。
+- **`torch_profiler_activities`**（`config/profiler.py:55`）：worker 侧 torch profiler 记录的 activity 列表（`CPU`/`CUDA`/`PrivateUse1`/`XPU`）；缺省时按平台默认（GPU=CPU+CUDA，XPU=CPU+XPU，CPU=CPU）。`delay_iterations`/`max_iterations` + `ignore_frontend=False` 且记录 CPU 时会告警高开销（`config/profiler.py:180` 校验）。
+- **`WorkerProfiler.should_annotate`**（`wrapper.py:60`）：worker 迭代是否注入 profiler annotation（`record_function`）的开关，前端/worker 可分别控制。
+- **Proton**（Triton 官方 profiler）：`proton_profiler_dir` + `proton_context`（shadow/python）+ `proton_data`（tree/trace），worker 各写 rank 独立文件；适合 kernel 级分析。
+- trace 输出目录 `torch_profiler_dir` 支持 URI 路径（`gs://`/`s3://`/`hdfs://`，`_is_uri_path` 判断，`config/profiler.py:25`）。
+- 详细用法见 `docs/contributing/profiling.md`。
 
 **多机通信问题**
 - `VLLM_HOST_IP` 每节点必设；NCCL 变量（`NCCL_SOCKET_IFNAME` 等）建议在集群创建时注入（`docs/serving/distributed_troubleshooting.md`）；
