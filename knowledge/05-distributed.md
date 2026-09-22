@@ -1,6 +1,6 @@
 # 分布式并行（TP/PP/DP/EP）与 KV 传输
 
-> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release；main 已领先该 release 分支 56+ commits，V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 > 核心目录：`vllm/distributed/`、`vllm/config/parallel.py`、`vllm/v1/executor/`、`vllm/v1/worker/`。
 
 ---
@@ -71,7 +71,7 @@ world_size_across_dp = world_size * data_parallel_size
 - DP 的三种 LB 模式（`parallel.py`）：
   - 默认（internal）：vLLM 内部在 DP rank 间负载均衡。
   - `data_parallel_hybrid_lb`：每节点一个 AsyncLLM + API server，vLLM 在本地 DP rank 间 LB，外部 LB 在节点/副本间 LB。
-  - `data_parallel_external_lb`：K8s “one-pod-per-rank” 宽 EP 部署，仅 MoE。
+  - `data_parallel_external_lb`：K8s “one-pod-per-rank” 宽 EP 部署，仅 MoE。**v0.30 修复（#53743）**：`ParallelConfig.nnodes_within_dp` 在 external LB 下（`data_parallel_size_local` 固定 1）DP 副本数超过节点数时原 floor 除法会得 0，现 `max(..., 1)`（不跨节点的副本也占 1 个节点）；非 external 模式下 `nnodes % data_parallel_node_size != 0` 直接报错（此前静默 floor）。
 
 ### 2.4 Expert Parallelism (EP)
 <!-- tags: ep, expert-parallel, 专家并行, all2all, moe -->
@@ -202,6 +202,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - 超过阈值或 world_size 不支持 → 落回 PyNCCL。
 - 需要 P2P 可访问（`gpu_p2p_access_check`，`VLLM_SKIP_P2P_CHECK` 可跳过检查）。
 - 跨节点（非同节点）时走 **MNNVL**（multicast）路径，`mnnvl_only=True`。
+- **DSV4.1 mHC 融合 all-reduce**（#57643）：DeepSeek V4.1 的 mHC（multi-head compression）层把 **TP all-reduce 与 mHC 输入准备融合**成一个 MNNVL Lamport multicast CUDA kernel（`torch.ops._C_custom_ar.all_reduce_mhc`）。门控 `supports_mhc_all_reduce`（`vllm/models/deepseek_v41/nvidia/ops/mhc.py:46`）：TP==4、无 EP、`hidden_size==5120`、`hc_mult==4`、`ca_comm.mnnvl_lamport_ag_multicast_ptr` 可用、CUDA_ARCH>=900。模型侧 `fuse_mhc_all_reduce = mhc_stream is not None and supports_mhc_all_reduce`（`nvidia/model.py:555`）；overlap 仅在 `torch.cuda.is_current_stream_capturing()` 时启用（`model.py:384-391`），即 **full CUDA graph 捕获路径专用**（#57874 收紧：DBO/PIECEWISE 图不走此路径）。小 batch（n<=16）走 `all_reduce_mhc`，否则回退 `tp.all_reduce`（`mhc_shifted_post_pre`，`mhc.py:153`，签名新增 `stream`/`reduce_results` 参数）。
 
 ### 4.4 NCCL symmetric memory（NVLS）
 <!-- tags: symm-mem, nvls, nccl, 阈值, all-gather -->
@@ -259,8 +260,8 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 <!-- tags: worker, 并行, worker-base, init-device, numa -->
 - `WorkerBase`（`vllm/v1/worker/worker_base.py:44`）：硬件无关接口（`init_device`/`load_model`/`execute_model`/`sample_tokens`/`determine_available_memory` 等）。
 - `WorkerWrapperBase`（`worker_base.py:212`）：单进程包装，`init_worker` 时按 `worker_cls`（`parallel_config.worker_cls`，默认 `"auto"` 按平台解析）动态实例化真实 worker，并支持 `worker_extension_cls` 注入属性/方法（供 `collective_rpc` 调用）。
-- GPU worker：`vllm/v1/worker/gpu_worker.py::Worker`（`init_device` 在 `:357`）。`init_device` 里做 DP local rank 到 `local_rank` 的映射（`local_rank += dp_local_rank * tp_pp_world_size`）、NUMA 绑定、物理 GPU id 映射等。
-- worker 内调 `init_distributed_environment`（`gpu_worker.py:1543`）+ `ensure_model_parallel_initialized`（`gpu_worker.py:1552`）建立进程组。
+- GPU worker：`vllm/v1/worker/gpu_worker.py::Worker`（`init_device` 在 `:364`）。`init_device` 里做 DP local rank 到 `local_rank` 的映射（`local_rank += dp_local_rank * tp_pp_world_size`）、NUMA 绑定、物理 GPU id 映射等。
+- worker 内调 `init_distributed_environment`（`gpu_worker.py:1519`）+ `ensure_model_parallel_initialized`（`gpu_worker.py:1528`）建立进程组。
 
 ---
 
@@ -285,12 +286,12 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - `kv_connector_extra_config`：连接器自定义 JSON。
 - `kv_connector_module_path`：外部连接器模块路径（V1）。
 - `kv_load_failure_policy`：`recompute`（重算失败 block）/ `fail`（默认，直接失败）。
-- CLI：`--kv-transfer-config '{"kv_connector": "...", "kv_role": "..."}'`（`arg_utils.py:1728`，支持 `80m` 这种人读数字）。
+- CLI：`--kv-transfer-config '{"kv_connector": "...", "kv_role": "..."}'`（`arg_utils.py:1737`，支持 `80m` 这种人读数字）。
 
 ### 6.3 连接器工厂与注册（`kv_connector/factory.py`）
 <!-- tags: connector, factory, 注册, nixl, mooncake -->
 `KVConnectorFactory` 惰性注册/加载。已注册连接器（`factory.py:153` 起）：
-- `NixlConnector`（= `NixlPullConnector`，pull/READ 模式）、`NixlPullConnector`、`NixlPushConnector`（push/WRITE 模式）—— 基于 NIXL（RDMA）。v0.30：NIXL push prefill 支持 **attention-HMA 布局**（#50494），PP push prefill 场景下按 HMA 分组传输。
+- `NixlConnector`（= `NixlPullConnector`，pull/READ 模式）、`NixlPullConnector`、`NixlPushConnector`（push/WRITE 模式）—— 基于 NIXL（RDMA）。v0.30：NIXL push prefill 支持 **attention-HMA 布局**（#50494），PP push prefill 场景下按 HMA 分组传输；**DCP 跨 MLA cache region 的 pull 修复**（#57389，`nixl/base_worker.py`）：`_match_local_and_remote_block_ids` 增加 `num_remote_blocks` 参数按**全局 DCP 位置**对齐 local/remote block（排除分配 padding），region 分组不一致且物理/逻辑块比 ≠1 时显式 `NotImplementedError`，远端页不覆盖请求范围时报错而非静默截断。
 - `LMCacheConnectorV1`、`LMCacheMPConnector`（LMCache 外部 KV 存储）。
 - `MooncakeConnector`、`MooncakeStoreConnector`（Mooncake）。
 - `FlexKVConnectorV1`、`HF3FSKVConnector`（HF3FS 文件系统）。
@@ -351,7 +352,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 ### 7.3 集成
 <!-- tags: eplb, 集成, 开关, eplb-config, 每步 -->
 - 开关：`enable_eplb=True`（要求 `enable_expert_parallel=True` 且 TP×PCP×DP>1，`parallel.py:533`；仅 CUDA/ROCm）。
-- 每步 `gpu_model_runner.py::eplb_step`（`:3407`）调 `eplb_state.step(...)` 更新统计、触发重排。
+- 每步 `gpu_model_runner.py::eplb_step`（`:3380`）调 `eplb_state.step(...)` 更新统计、触发重排。
 - EPLB 组（`get_eplb_group()`）与 EP 组同 rank 但独立，隔离通信。
 - 配置 `EPLBConfig`（`parallel.py:62`）：`window_size`(1000)、`step_interval`(3000)、`num_redundant_experts`(0)、`use_async`(True)、`policy`("default")、`communicator`(None=自动)、`log_balancedness`。CLI：`--enable-eplb`、`--eplb-config`。
 
@@ -401,6 +402,16 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 ### 9.3 KV Events
 <!-- tags: kv-events, 事件, zmq, block-stored, 外部索引 -->
 `vllm/distributed/kv_events.py`：`KVCacheEvent`（`BlockStored`/`BlockRemoved`）+ `EventBatch`，用 ZMQ 发布，供外部 KV 索引/缓存感知（如 LMCache、prefix cache 跨实例）。配置 `KVEventsConfig`（`vllm/config/kv_events.py`）。
+
+### 9.4 AuxOutput Connector（block 键控 routed-expert 输出存储，#45635 新增）
+<!-- tags: aux-output, routed-experts, moe, block-hash, mmap, lru, 专家路由 -->
+`vllm/distributed/aux_output_connector/`：把 MoE 每 token 的 **routed experts**（专家路由结果）按 **KV block hash** 为键持久化到进程内 mmap arena，供外部系统（如专家级 KV 复用/分析）按 prefix-cache block 读取。设计要点：
+- **配置** `AuxOutputConfig`（`vllm/config/aux_output.py`）：`enable_return_routed_experts: bool=False`（默认关）、`max_bytes: int|None`（arena 上限，None 时由 worker 推导）；挂在 `VllmConfig.aux_output_config`（`config/vllm.py:380`）。
+- **兼容性校验** `_verify_aux_output_compatibility`（`config/vllm.py:1091`）：要求 V2 model runner + generate runner + MoE + prefix caching；拒绝 adaptive spec verification、PP>1、DCP/PCP>1、KV connector 共存。
+- **scheduler 侧** `AuxOutputSchedulerConnector`（`connector.py:44`）：随每步构建 `AuxOutputConnectorMetadata`（含 `PackedBlockHashes`，按请求打包 block hash）；请求结束时 `request_finished` 释放引用。scheduler 钩子在 `vllm/v1/core/sched/scheduler.py`：init `:394-396`、`build_connector_meta` `:1475-1477`、`request_finished` `:1536-1537` 与 `:2564-2565`、`take_output` `:2074-2076`。
+- **worker 侧** `AuxOutputWorkerConnector`（`worker.py:83`）：`max_bytes` 缺省推导为 `kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes`（`worker.py:122-127`）；`max_pending_batches = 2 * max_num_seqs`。
+- **存储** `BlockObjectStore`（`store.py:100`）：mmap arena + LRU 驱逐（`_evict_to_fit` `store.py:125`）；**fail-closed**——空间不足且无法驱逐时抛 `BlockObjectStoreError`（`store.py:23`）而不是静默丢弃；后台清理线程 `BackgroundBlockObjectStore`（`store.py:27`）。
+- **输出通路**：`ModelRunnerOutput.aux_output_connector_output`（`vllm/v1/outputs.py:299`）；routed-expert 数据经 `routed_experts.py`（`RoutedExpertsBuffer:27`，key 前缀 `vllm-artifact/{namespace}/`，`publish_routed_experts:182`）发布。
 
 ---
 
@@ -481,6 +492,8 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - `vllm/config/kv_transfer.py` — `KVTransferConfig`。
 - `vllm/config/ec_transfer.py` — `ECTransferConfig`。
 - `vllm/config/weight_transfer.py` — `WeightTransferConfig`。
+- `vllm/config/aux_output.py` — `AuxOutputConfig`（routed-expert 输出存储，#45635）。
+- `vllm/distributed/aux_output_connector/` — AuxOutput connector（scheduler/worker/store/routed_experts）。
 - `vllm/engine/arg_utils.py` — 上述配置对应的 CLI flag。
 
 **Executor / Worker**

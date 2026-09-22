@@ -1,6 +1,6 @@
 # 量化与多硬件平台
 
-> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的量化体系分两条主线：
@@ -173,7 +173,7 @@ vLLM 的量化体系分两条主线：
   - MLA：SM100 → `[FLASHINFER_MLA, TOKENSPEED_MLA, CUTLASS_MLA, FLASH_ATTN_MLA, FLASHMLA, TRITON_MLA, *sparse]`（FP8 KV 时 FlashInfer 优先）；SM120 → `[TRITON_MLA, FLASHINFER_MLA_SPARSE_SM120]`；其他 → `[FLASH_ATTN_MLA, FLASHMLA, ...]`。
   - 每个候选调 `validate_configuration()` 过滤（如 block_size 不兼容），选优先级最高者；`--attention-backend` 可强制。
 - `check_and_update_config`（:321）：`worker_cls` 默认 `vllm.v1.worker.gpu_worker.Worker`；WSL2 + `--cpu-offload-gb` + cudagraph 的 pinned memory 警告。
-- 部署要点：FP8 需 SM89+（`torch._scaled_mm` 限制 e4m3fn）；DeepGEMM（`VLLM_USE_DEEP_GEMM`，默认开）用于 Hopper FP8 block GEMM；`VLLM_BATCH_INVARIANT=1` 时 FP8 linear 走 BF16 dequant 路径保证可复现（`fp8.py:440`）。
+- 部署要点：FP8 需 SM89+（`torch._scaled_mm` 限制 e4m3fn）；DeepGEMM（`VLLM_USE_DEEP_GEMM`，默认开）用于 Hopper FP8 block GEMM；`VLLM_BATCH_INVARIANT=1` 时 FP8 linear 走 BF16 dequant 路径保证可复现（`fp8.py:440`）。**v0.30 增量**：DeepGEMM 构建修复（#57554，`cmake/external_projects/deepgemm.cmake`）——pinned 到 vLLM fork 的 `e1f418c2`（含 vllm-project/DeepGEMM#12 的 CUDA 12.x layout header fix），CUDA 12.9 release 构建恢复可用。
 
 **ROCm（`rocm.py`，`RocmPlatform` :488）**
 - `device_type="cuda"`（HIP 复用 torch.cuda API）、`dispatch_key="CUDA"`、`dist_backend="nccl"`（RCCL）、`device_control_env_var="CUDA_VISIBLE_DEVICES"`（也认 `ROCR_VISIBLE_DEVICES` 的 ray noset 变量）。
@@ -184,6 +184,9 @@ vLLM 的量化体系分两条主线：
 - `apply_config_platform_defaults`（:871）：AITer 开启时自动加 `+quant_fp8`、`+grouped_topk`、`+sparse_attn_indexer` custom ops。
 - `verify_quantization`（:977）：AWQ 在 ROCm 上强制 `VLLM_USE_TRITON_AWQ=1`（Marlin 不可用）。
 - 部署要点：大量 `VLLM_ROCM_USE_AITER_*` 开关（`VLLM_ROCM_USE_AITER_LINEAR/MOE/MHA/MLA/FP8BMM/FP4BMM/...`，默认多为 True）；`VLLM_ROCM_FP8_PADDING`/`VLLM_ROCM_MOE_PADDING`（FP8 对齐 padding）；DCP/PCP 与 full cudagraph 不兼容会自动降为 PIECEWISE（:939）。
+- **v0.30 增量（模型级 ROCm 路径）**：
+  - **Hy4 ROCm 路径**（#57526，`models/hy_v4/amd/model.py`，+718 行）：Hy4 在 ROCm 上有独立模型实现，backbone 走 torch.compile。
+  - **MiniMax-M3 packed LBHNC AITER QK-norm 融合**（#54535，`models/minimax_m3/amd/model.py`）：ROCm 上启用 packed LBHNC 布局的 AITER `fused_qknorm_idxrqknorm` 融合（QK-norm + indexer RoPE + QK-norm），sparse attention 的 slot 用 `minimax_m3_rebase_slots_to_page16` 重基到 page-16，LHBNC/LBHNC 两种布局均支持。
 
 **CPU（`cpu.py`，`CpuPlatform` :98）**
 - `dist_backend="gloo"`，`inference_mode()` 回退 `torch.no_grad()`，`is_pin_memory_available()=False`，`support_hybrid_kv_cache()=True`。
@@ -191,13 +194,16 @@ vLLM 的量化体系分两条主线：
 - attention：只有 `CPU_ATTN`；MLA 模型在 x86 + AMX tile 时用 `AMX_MLA`，否则 `CPU_MLA`（参考实现，且强制 `block_size=16`，:256；非 AMX MLA 还强制关 chunked prefill 和 prefix caching，:487）。
 - `check_and_update_config`（:198）：默认 `block_size=128`（非 32 倍数会警告）；`worker_cls` 默认 `vllm.v1.worker.cpu_worker.CPUWorker`；`VLLM_ENABLE_V1_MULTIPROCESSING=1` 时强制 `mp` executor（OMP 线程绑定需要）；`VLLM_CPU_KVCACHE_SPACE`（GB）可指定 KV cache 空间；自动 `LD_PRELOAD` libgomp/libtcmalloc；AVX-512BF16 时 SSM conv state 用 SD layout。
 - 量化：无白名单（全量方法可用），但实际 kernel 由 `choose_mp_linear_kernel` 按平台过滤——AWQ/GPTQ 走 `CPUWNA16LinearKernel`（`mixed_precision/cpu.py:20`，要求 group_size 偶数、input size 32 倍数）；`VLLM_CPU_INT4_W4A8`（默认 True）启用 INT4 W4A8。**v0.30 新增 CPU FP8 W8A8 linear/MoE**（#49942，`csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp` + `moe_fp8_w8a8.cpp`，基于 sgl-kernels），CPU 上也能跑 FP8 W8A8 模型。
-- 部署要点：`VLLM_CPU_OMP_THREADS_BIND`（线程绑核，默认 auto）、`VLLM_CPU_NUM_OF_RESERVED_CPU`、`VLLM_CPU_ATTN_SPLIT_KV`（默认 True）；NUMA 拓扑发现（`discover_numa_topology`）供 KV transfer 预留核。
+- 部署要点：`VLLM_CPU_OMP_THREADS_BIND`（线程绑核，默认 auto）、`VLLM_CPU_NUM_OF_RESERVED_CPU`、`VLLM_CPU_ATTN_SPLIT_KV`（默认 True）；NUMA 拓扑发现（`discover_numa_topology`）供 KV transfer 预留核。**v0.30 新增**：`--device-memory-utilization` CLI 别名（#56547，`CacheConfig.device_memory_utilization` property，非 GPU 平台对 `gpu_memory_utilization` 的设备中性别名）。
 
 **XPU（`xpu.py`，`XPUPlatform` :103）**
 - `dist_backend="xccl"`（oneCCL），`device_control_env_var="ZE_AFFINITY_MASK"`，`ray_device_key="GPU"`。
 - **量化白名单**（:113）：`awq, gptq, auto_awq, auto_gptq, inc, fp8, deepseek_v4_fp8, mxfp4, mxfp8, fp8_per_tensor, fp8_per_block, online, gpt_oss_mxfp4, modelopt, compressed-tensors`。
 - attention（:143）：turboquant KV → `TURBOQUANT`；sparse → `XPU_MLA_SPARSE`；MLA → `TRITON_MLA`；默认 `FLASH_ATTN`，fp32/mm-prefix 回退 `TRITON_ATTN`。
 - `check_and_update_config`（:284）：XPU Graph 实验性（需 `VLLM_XPU_ENABLE_XPU_GRAPH=1` 且 PyTorch 支持，仅单卡）；禁用多个 fusion pass（`fuse_gemm_comms`、`fuse_allreduce_rms`、`fuse_attn_quant` 等）；UVA offload 时关 Inductor static launcher；`worker_cls` 默认 `vllm.v1.worker.xpu_worker.XPUWorker`；强制 `spawn` 多进程、`UCX_MEMTYPE_CACHE=n`、`shutdown_timeout=5`。
+- **v0.30 增量**：
+  - **XPU fused top-k/top-p sampler kernel**（#57277，`vllm/v1/sample/ops/topk_topp_sampler.py`）：`xpu_sampler_supported()`（`:129`）在 XPU 平台且 `VLLM_XPU_USE_SAMPLER_KERNEL=1`（默认开）时启用 `xpu_sample()`（`:151`）——fused kernel 直接采样，**不做 vocab 排序、不物化概率张量**，统计上等价于 `random_sample`（噪声来自 device 默认 generator，恒随机采样）。限制：请求需要 per-request seed 或 greedy 时不可用。Model Runner V2 的 sampler（`vllm/v1/worker/gpu/sample/sampler.py`）也接入（`use_xpu_sampler` `:92-93`）。
+  - **`moe_align_block_size` 7-arg 回退**（#57855，`_custom_ops.py:2274`）：XPU CI 上旧版 torch 只支持 7 参数签名，加 fallback。
 - FP8 linear 默认 **W8A16**（weight-only），`--linear-backend xpu` 强制 W8A8，`--linear-backend xpu_woq` 显式 W8A16（`docs/features/quantization/online.md`）。
 - GDN 模型 block_size 需 64 倍数（`update_block_size_for_backend`，:388）。
 
@@ -237,7 +243,9 @@ vLLM 的量化体系分两条主线：
 - `--gpu-memory-utilization`（默认 0.92）、`--block-size`（KV block，默认 16，平台/backend 会自动调整）。
 
 **环境变量（`vllm/envs.py`，节选）**
-- 通用量化：`VLLM_BATCH_INVARIANT`（可复现模式，禁用 Marlin 等）、`VLLM_DISABLED_KERNELS`（逗号分隔的 kernel 类名黑名单）、`VLLM_MARLIN_INPUT_DTYPE`（`int8`/`fp8`）、`VLLM_MARLIN_USE_ATOMIC_ADD`、`VLLM_USE_DEEP_GEMM` / `VLLM_MOE_USE_DEEP_GEMM` / `VLLM_USE_DEEP_GEMM_E8M0`（默认 True，Hopper FP8 block GEMM）、`VLLM_USE_TRITON_AWQ`（ROCm 上 AWQ 自动置 1）、`VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD`、`VLLM_HUMMING_*`、`VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER`。
+- 通用量化：`VLLM_BATCH_INVARIANT`（可复现模式，禁用 Marlin 等）、`VLLM_DISABLED_KERNELS`（逗号分隔的 kernel 类名黑名单）、`VLLM_MARLIN_INPUT_DTYPE`（`int8`/`fp8`）、`VLLM_MARLIN_USE_ATOMIC_ADD`、`VLLM_USE_DEEP_GEMM` / `VLLM_MOE_USE_DEEP_GEMM` / `VLLM_USE_DEEP_GEMM_E8M0`（默认 True，Hopper FP8 block GEMM）、`VLLM_USE_TRITON_AWQ`（ROCm 上 AWQ 自动置 1）、`VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD`、**`VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD`（v0.30 新增，#50814，默认 False——MXFP4 emulation 路径加载期一次性反量化到 BF16 跑，省每步 dequant 换显存）**、`VLLM_HUMMING_*`、`VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER`。
+- **GEMM-RS 融合（v0.30，#57428）**：`VLLM_KIMI_K3_GEMM_RS` **更名 `VLLM_ENABLE_GEMM_RS`**（默认 0）——SM100 BF16/MXFP8 GEMM + reduce-scatter 融合 kernel 从 Kimi-K3 专属扩到 DSV4.1 `wo_b`（sequence-parallel row-parallel 投影），要求所有 TP rank 在同一 NVLink 域。
+- **已移除**：`VLLM_PLE_CPU_OFFLOAD`（Engram `cpu_offload` 固定默认 True，`config/engram.py`）。
 - 平台选择：`VLLM_TARGET_DEVICE`（`cuda`/`cpu`，显式 CPU 时权威）、`VLLM_TPU_USING_PATHWAYS`。
 - ROCm：`VLLM_ROCM_USE_AITER`（总开关）及 `VLLM_ROCM_USE_AITER_{LINEAR,MOE,MHA,MLA,FP8BMM,FP4BMM,UNIFIED_ATTENTION,...}`、`VLLM_ROCM_FP8_PADDING`、`VLLM_ROCM_MOE_PADDING`、`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION`。
 - CPU：`VLLM_CPU_OMP_THREADS_BIND`、`VLLM_CPU_NUM_OF_RESERVED_CPU`、`VLLM_CPU_KVCACHE_SPACE`（GB）、`VLLM_CPU_ATTN_SPLIT_KV`、`VLLM_CPU_INT4_W4A8`、`VLLM_ZENTORCH_WEIGHT_PREPACK`（Zen CPU）。
@@ -267,6 +275,7 @@ vLLM 的量化体系分两条主线：
 | `vllm/model_executor/layers/quantization/{auto_awq,auto_gptq,modelopt,mxfp4,compressed_tensors,torchao,inc,quark,humming,moe_wna16,experts_int8,kv_cache,turboquant}` | 各量化方法实现 |
 | `vllm/model_executor/layers/quantization/utils/quant_utils.py` | `QuantKey`/`GroupShape`（量化方案的形式化描述） |
 | `vllm/model_executor/kernels/linear/`（`scaled_mm/`、`mixed_precision/`、`mxfp4/`、`mxfp8/`、`nvfp4/`） | W8A8 与 weight-only GEMM kernel 族 + 选择器 |
+| `vllm/model_executor/kernels/linear/cute_dsl/gemm_rs_ar.py` | **v0.30 新增**（#57428）：SM100 GEMM + all-reduce/reduce-scatter 融合 kernel（cute DSL，`VLLM_ENABLE_GEMM_RS`），Kimi-K3 与 DSV4.1 `wo_b` |
 | `vllm/model_executor/layers/fused_moe/oracle/` | MoE kernel 选择（fp8/int_wna16 等） |
 | `vllm/model_executor/layers/linear.py`（:255 `LinearBase.__init__`）、`layers/attention/attention.py` | 量化 method 与层绑定 |
 | `vllm/platforms/interface.py` | `Platform` 基类、`DeviceCapability`、设备 ID 映射 |

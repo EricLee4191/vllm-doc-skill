@@ -11,7 +11,7 @@
 1. **架构问答** — vLLM 的内部机制：引擎进程模型、调度器与 KV Cache、模型执行与编译、Attention 后端、分布式并行（TP/PP/DP/EP）、量化与多硬件、投机解码、API 服务。回答时引用具体文件路径与配置项，给出可验证的依据。
 2. **部署调优** — 给定模型规模、GPU 数量、目标（吞吐 / 延迟），给出**具体的 CLI 参数 / 环境变量**配置，说明每个参数的作用与权衡，并提供分步排查路径（OOM、慢、报错）。
 
-> 知识库基于 vLLM `main`（`86ce4d10e2`，2026-09-21）/ 最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）源码整理。vLLM 迭代很快，涉及"当前版本是否如此"的问题以源码为准。
+> 知识库基于 vLLM `main`（`d90f0eade5`，2026-09-22）/ 最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）源码整理。vLLM 迭代很快，涉及"当前版本是否如此"的问题以源码为准。
 
 ## 目录结构
 
@@ -29,7 +29,7 @@ vllm-skill/
 │   ├── 06-quantization-hardware.md#  量化与多硬件平台
 │   ├── 07-advanced-features.md  #   投机解码与高级推理特性
 │   ├── 08-deployment-optimization.md# 部署、API 服务与性能调优（最实用）
-│   └── INDEX.md                 #   tags 倒排索引（自动生成，632 tag）
+│   └── INDEX.md                 #   tags 倒排索引（自动生成，642 tag）
 └── scripts/
     └── build_tag_index.py       # 重建 INDEX.md 的脚本
 ```
@@ -72,7 +72,7 @@ grep -n "tags:.*kv-cache.*capacity\|tags:.*显存" knowledge/*.md
 # 命中后按行号 Read 对应区间
 ```
 
-`knowledge/INDEX.md` 是这些 tags 的倒排索引（632 个 tag → `文件:行号`），可直接 grep 定位。若文档改动后索引过期，重建：
+`knowledge/INDEX.md` 是这些 tags 的倒排索引（642 个 tag → `文件:行号`），可直接 grep 定位。若文档改动后索引过期，重建：
 
 ```bash
 python3 scripts/build_tag_index.py

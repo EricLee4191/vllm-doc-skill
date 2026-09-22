@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（release candidate）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 
@@ -109,6 +109,11 @@ MLA（DeepSeek 系列）的 KV cache 存 latent（`kv_c` + `k_pe`），backend �
 - **FLASH_ATTN_MLA**（`mla/flashattn_mla.py`）：用 vllm_flash_attn 做 MLA。
 - **Sparse MLA**：`FLASHMLA_SPARSE`、`FLASHINFER_MLA_SPARSE`、`FLASH_ATTN_MLA_SPARSE` 等，配合 indexer（`mla/indexer.py` 的 `DeepseekV32IndexerBackend`）做 top-k 稀疏。
   - **v0.30 加固**：sparse indexer 的 top-k 统一走共享 dispatcher `SparseIndexerTopk`（`model_executor/layers/indexer_topk.py`，GLM-5.3-Flash kpool indexer 也接入，#57546）——`auto` 模式在 `AUTO_COOPERATIVE_MAX_ROWS=64` 行以内优先 `cooperative_topk`，超出回退 `persistent_topk`（`deep_select`/`flashinfer`/`torch` 为显式 opt-in）。`sparse_attn_indexer`（`model_executor/layers/sparse_attn_indexer.py`）对 ragged decode batch（`num_decode_tokens % num_seqs != 0`）改走 padded 路径（#52500），避免 SM120 TP=2 下 uniform reshape 崩溃。SM100 `fp8_ds_mla` cache scales 修复（#49435，`csrc/libtorch_stable/cache_kernels.cu` + `kimi_k3`/`deepseek_v32` key-concat kernel）。
+  - **v0.30 增量**：sparse attention metadata 去冗余（#57885）——`mla/indexer.py` 的 `compressed_seq_lens` 仅在 `compress_ratio > 1` 时做整除（否则直接别名 `seq_lens`，省一次 kernel），`mla/sparse_swa.py` 的 `is_valid_token` 用 `torch.ge(slot_mapping, 0, out=...)` 原地写替代 `copy_`。DSV4.1 **SWA bounded replay 在 ROCm 上禁用**（#57906，`models/deepseek_v41/attention.py`）：sparse SWA metadata builder 会转发 `replay_start`，但它依赖的 window clamp 只存在于 FlashInfer/FlashMLA prefill kernel，ROCm 下 padded slot 会 fault，故 ROCm 上自动关闭并 warning，sliding-window cache 改走 prefix caching。
+  - **GLM5Next NoPE sparse-MLA（v0.30 新增，#55385）**：head_size **512**（512 NoPE + `qk_rope_head_dim=0`）的 NoPE 模型接入 sparse MLA——`FLASHMLA_SPARSE` 的 `get_supported_head_sizes` 扩到 `[576, 512]`，但 512 仅限 **SM90 + bf16 KV + rope-free**（`supports_combination` 读 `hf_text_config.qk_rope_head_dim` 校验）；`FLASH_ATTN_MLA_SPARSE` 的 FA3 QV 路径要求 64-wide Q/K 特化，NoPE 时用零 Q + 64-wide K 切片占位（`flashattn_mla_sparse.py:309`）。量化 DS-MLA cache（576/656B envelope）与 SM100 bf16 走各自独立路径。
+  - **sparse MLA 准备开销削减（#57458）**：`mla/sparse_utils.py` 的 index-remap Triton kernel 重构（`ConvertReqIndexToGlobalIndexKernel.sparse_mla_index_remap_kernel`，`NUM_TOPK_TOKENS` 提升为 constexpr、multi-tile 支持），降低 GLM 系 sparse MLA 的 metadata 准备成本。
+  - **ROCm DSV4 自适应验证（#52362）**：`mla/indexer.py` 的 `DeepseekV4IndexerBackend.supports_device_cpu_query_lens_mismatch` 在 ROCm 上返回 True（adaptive verification 走 per-token flattened indexer 路径，row ownership 从 device decode lengths 推导）；V4.1 不继承该放宽（仅验证过 V4 路径）。
+  - **GDN stateless first-chunk 分类修复（#51565，`backends/gdn_attn.py`）**：无 spec mask 时改用 `seq_lens_cpu_upper_bound <= query_len` 判定"无先前状态"（首 chunk 按 prefill 处理以 mask 回收的 state），并用 `is_prefilling` 排除 capture batch（其 `seq_len == query_len` 但非 prefill）；尾 padding 从 prefill 计数中剔除。
 
 **MLA prefill 后端**独立选择（`mla/prefill/selector.py`），`MLAPrefillBackendEnum`：`FLASH_ATTN` / `FLASHINFER` / `TRTLLM_RAGGED` / `TOKENSPEED_MLA` / `ROCM_AITER_FA` / `CPU_NATIVE`。优先级（`_get_mla_prefill_backend_priorities`）：SM100 且 DSV3 维度（192/64/256）时 `TRTLLM_RAGGED` 优先；否则 `FLASH_ATTN` 优先。可用 `AttentionConfig.mla_prefill_backend` 显式指定。
 
@@ -203,15 +208,15 @@ Triton kernel 分布在三处：
 ### 7.1 CLI / 配置
 <!-- tags: cli, 配置, attention-backend, attention-config, flags -->
 
-- **`--attention-backend <NAME>`**（`arg_utils.py:1023`）：全局指定 backend，取值即 `AttentionBackendEnum` 名（如 `FLASH_ATTN`、`FLASHINFER`、`TRITON_ATTN`、`FLASHMLA`、`TRITON_MLA`）。显式指定且不合法会直接报错。
-- **`--attention-config` / `-ac`**（`arg_utils.py:1741`）：传 `AttentionConfig` 的 JSON/dict，可设任意字段，例如：
+- **`--attention-backend <NAME>`**（`arg_utils.py:1032`）：全局指定 backend，取值即 `AttentionBackendEnum` 名（如 `FLASH_ATTN`、`FLASHINFER`、`TRITON_ATTN`、`FLASHMLA`、`TRITON_MLA`）。显式指定且不合法会直接报错。
+- **`--attention-config` / `-ac`**（`arg_utils.py:1750`）：传 `AttentionConfig` 的 JSON/dict，可设任意字段，例如：
   - `--attention-config '{"backend": "FLASHINFER"}'`
   - `--attention-config '{"flash_attn_version": 3}'`
   - `--attention-config '{"use_trtllm_attention": true}'`
   - `--attention-config '{"mla_prefill_backend": "TRTLLM_RAGGED"}'`
   - `--attention-config '{"backend_per_kind": {"mla_attention": "FLASHINFER_MLA", "sliding_window_mla": "TRITON_MLA"}}'`
 - **`--mamba-backend`**：SSM/线性层 backend（`MAMBA1`/`MAMBA2`/`GDN_ATTN`/`LINEAR`/`SHORT_CONV`）。
-- 注意：`--attention-backend` 与 `attention_config.backend` 不能同时设（`arg_utils.py:2511` 会报错）。
+- 注意：`--attention-backend` 与 `attention_config.backend` 不能同时设（`arg_utils.py:2524` 会报错）。
 
 ### 7.2 `AttentionConfig` 关键字段（`vllm/config/attention.py`）
 <!-- tags: attention-config, 字段, backend, mla-prefill, kv-dtype -->

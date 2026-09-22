@@ -1,6 +1,6 @@
 # vLLM 知识库总览
 
-> 基于 vLLM main（`86ce4d10e2`，2026-09-21），最新 tag **v0.30.0rc2**（`fa6ff06066`，2026-09-18，release candidate）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
+> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release；main 已领先该 release 分支 56+ commits）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
 
 ## 1. vLLM 是什么
 <!-- tags: intro, overview, 简介 -->
@@ -87,7 +87,7 @@ flowchart TB
 ### 2.3 配置体系
 <!-- tags: vllmconfig, config, 配置, engineargs, 解析链 -->
 
-所有配置聚合在 `VllmConfig`（`vllm/config/vllm.py:354`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `attention_config` / `speculative_config` / `kv_transfer_config` / `quant_config` / `lora_config` / `observability_config` …。解析链：**CLI flag → `EngineArgs`（`vllm/engine/arg_utils.py:446`，字段名与 flag 一一对应）→ `create_engine_config()` 逐个子 config → `VllmConfig.__post_init__` 跨 config 推导**（如按 executor 能力定 `async_scheduling`）。环境变量集中在 `vllm/envs.py`。
+所有配置聚合在 `VllmConfig`（`vllm/config/vllm.py:355`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `attention_config` / `speculative_config` / `kv_transfer_config` / `quant_config` / `lora_config` / `observability_config` …。解析链：**CLI flag → `EngineArgs`（`vllm/engine/arg_utils.py:447`，字段名与 flag 一一对应）→ `create_engine_config()` 逐个子 config → `VllmConfig.__post_init__` 跨 config 推导**（如按 executor 能力定 `async_scheduling`）。环境变量集中在 `vllm/envs.py`。
 
 ## 3. 子系统导读
 <!-- tags: index, navigation, 导读 -->
@@ -195,7 +195,8 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
 | `vllm/model_executor/` | 模型定义、算子层、权重加载、量化 |
 | `vllm/config/vllm.py` | `VllmConfig` 聚合与推导 |
 | `vllm/engine/arg_utils.py` | `EngineArgs`：全部 CLI 参数与默认值逻辑 |
-| `vllm/entrypoints/` | CLI（`serve`/`bench`/`run-batch`）、OpenAI 端点、`LLM` 类 |
+| `vllm/entrypoints/` | CLI（`serve`/`bench`/`run-batch`/`snapshot`）、OpenAI 端点、`LLM` 类 |
+| `vllm/snapshot/` | **v0.30 新增**：initialized engine snapshots（CRIU 引擎快照，`vllm snapshot create/restore`） |
 | `rust/`（`vllm-frontend-rs`） | Rust 前端（实验性，v0.28+）：axum HTTP + ZMQ engine client |
 | `vllm/envs.py` | 全部 `VLLM_*` 环境变量注册表 |
 | `docker/Dockerfile` | 官方镜像（`vllm-openai` 等 target） |
@@ -203,6 +204,18 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
 ## 7. 增量更新记录
 <!-- tags: changelog, 增量更新, baseline, 基线 -->
 
+- **2026-09-22**：基线从 `8b98b7d0b4`（2026-09-21，v0.30.0rc2）推进到 `d90f0eade5`（2026-09-22，最新 tag **v0.30.0**，`9ed533eb4a`，2026-09-20 正式 release）。区间 56 commits。主要变更：
+  - **Initialized engine snapshots**（#51360，`vllm/snapshot/` 新包 + `vllm snapshot create/restore` CLI）：CRIU + CUDA checkpoint 捕获**已初始化引擎**的进程树快照，restore 时校验环境指纹并复现记录的 token 输出，换取极快激活；实验性，限 Linux x86-64 + 单 NVIDIA GPU + TP1 明文 HTTP，详见 08 §1.1。
+  - **KV hints 请求信封**（#53423，`vllm/v1/kv_hints/`）：orchestrator 可编程 KV 管理提示（`KvHintsEnvelope`/`KvHintAction`，版本化 action），经 `InputProcessor`→`Request`→`ReqContext` 贯通到 KV offload tiering（KVCR 的 router hint 改用此信封）。详见 02 §3.3。
+  - **调度器**：`long_prefill_token_threshold` 软化（#57951）——batch 中只有 1 个请求时不再截断其 prefill chunk（无人可饿死）；`ParallelConfig.nnodes_within_dp` 修复 external LB 下 DP rank 数超过节点数时 floor 到 0 的问题（#53743，external LB 时 `max(...,1)`，非 external 且不可整除直接报错）。详见 02/05。
+  - **投机解码**：DFlash 启用 async scheduling（#58065）；draft 模型配置覆盖统一为 `SpeculativeConfig.apply_draft_overrides`（`moe_backend`/`attention_backend`/`kv_cache_dtype` 仅非 None 时覆盖 target，`config/speculative.py`）；draft 加载统一走 `get_draft_load_config`（`model_loader/utils.py`）——Fast Start（`ipc_cache`）下 MTP draft 模型缓存到 daemon 独立 draft group（#57312）；DFlash/DSpark profiling query batch 上限（#56448）；MTP draft KV cache group 位置标注通用化（#55390，`kv_cache_utils.py` 的 trailing-layer fallback 从 DSV4 专属扩到所有 `method="mtp"`，含 DSV4.1 DSpark）。详见 02/03/07。
+  - **Attention**：GLM5Next **NoPE sparse-MLA**（head_size 512、`qk_rope_head_dim=0`）接入 FA/FlashMLA（#55385，`FLASHMLA_SPARSE` 支持 512 仅限 SM90 bf16 NoPE；FA3 QV 路径用 64-wide 零 Q 占位）；sparse MLA 准备开销削减（#57458，`sparse_utils.py` index-remap kernel 重构）；ROCm DSV4 自适应验证走 flattened device query lens（#52362）；GDN stateless first-chunk 分类修复（#51565，`gdn_attn.py` 用 `seq_lens_cpu_upper_bound` 区分首 chunk prefill 与 capture batch）。详见 04。
+  - **多模态**：processor/receiver cache 从 `multimodal/cache.py` 单文件重构为 `multimodal/cache/` 包（`base.py`/`lru.py`/`shm.py`/`factories.py`，`worker_receiver_cache_from_config` 等工厂从 registry 迁出）；`supports_multimodal_inputs` 从 registry 移到 `ModelConfig` 缓存属性（#57913）；Qwen2.5-VL 视频 fps 用于 temporal M-RoPE（#47736）。详见 07。
+  - **量化/平台**：MXFP4 emulation 加载期反量化（#50814，`VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD`，对齐已有 MXFP8 开关）；`VLLM_KIMI_K3_GEMM_RS` 更名 `VLLM_ENABLE_GEMM_RS`（#57428，GEMM-RS 融合 kernel 从 Kimi-K3 专属扩到 DSV4.1 `wo_b`，`kernels/linear/cute_dsl/gemm_rs_ar.py` 新增 1177 行）；`VLLM_PLE_CPU_OFFLOAD` 移除（Engram `cpu_offload` 固定默认 True）；CPU 新增 `--device-memory-utilization` CLI 别名（#56547，`CacheConfig.device_memory_utilization` property）。详见 06/08。
+  - **分布式**：NIXL DCP 跨 MLA cache region 的 pull 修复（#57389，`nixl/base_worker.py` 按全局 DCP 位置对齐 block + region 分组校验）；ROCm 显式拒绝 DSV4 FSE=1 + DPA+ETP 组合（#57919）。详见 05。
+  - **sleep mode**：level-2 sleep 保留冻结权重（#57891，`ModelConfig.sleep_preserve_parameter_names`（CLI `--sleep-preserve-parameter-names`）按 glob 保留指定参数跨 sleep，RL 场景免重传）；`gpu_worker.py` 新增 `_save/_restore_sleep_parameters`。详见 08。
+  - **安全/校验**：拒绝超过填充后 `max_tokens` 默认的 `min_tokens`（#57731，`input_processor.py`）；拒绝空 `structural_tag`（#47450，`sampling_params.py`）；grammar poll 改非阻塞（#55931，`structured_output/request.py` 用 `Future.done()` 替代 100µs timeout）；prompt embeds 的 `is_token_ids` 长度校验（#57006）。详见 01/07。
+  - 其他：Rust frontend 系列（parser-owned output grammar #55269、MiMo V2.5 parser #57933、vision processor spec #58109、mm-processor benchmark #51922）；ROCm Qwen GDN 输出 norm 省 reshape（#47842）；ROCm fused shared-expert gate GEMM 走 platform dispatcher（#54185）；fused silu-mul block-quant fast path 在 swiglu clamp 时跳过（#57984）；MoE 拒绝 monolithic backend 不支持的 hash routing（#57867）；chunked long-text embedding 归一化修复（#57498）。详见 03/06/07。
 - **2026-09-12**：基线从 `f32b17b6d6`（2026-08-21，v0.28.0rc1）推进到 `2f59050eda`（2026-09-12，最新 tag **v0.29.0**，`98dff2a81d`）。区间 985 commits。主要变更：
   - **Model Runner V2 成为默认**（`use_v2_model_runner` 默认 True，`vllm/v1/worker/gpu/` 模块化 runner；旧 `gpu_model_runner.py` 降为 legacy 回退）。详见 03 §1。
   - **KV cache 物理布局重构**（RFC #42082）：新增 `vllm/v1/kv_cache_layout.py` 的 `KVCacheLayout` 枚举（`LBNHC/LBHNC/LHBNC/BLHNC/BLNHC/BHLNC` + 兼容 `NHD/HND`），`VLLM_KV_CACHE_LAYOUT` 扩展为 7 种取值。详见 02 §5。
@@ -215,16 +228,16 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
   - **部署**：新增 scale-out 端点（`/v1/chat/completions/render`、`/inference/v1/generate` 等，`VLLM_ENABLE_SCALE_OUT_ENDPOINTS`）。详见 08。
   - 模型架构数从 290+ 增至 **380+**（新增 DeepSeek-V4/V4.1、GLM-5.3-Flash、Qwen4-Exp、Kimi-K3 等）。
 - **2026-09-19**：基线从 `2f59050eda`（2026-09-12，v0.29.0）推进到 `751f6807d9`（2026-09-19，最新 tag **v0.30.0rc2**，`fa6ff06066`，release candidate）。区间 419 commits。主要变更：
-  - **水印支持投机解码**：新增 `dual_key_gumbel` 算法（双 key gumbel-max，`supports_speculative_decoding=True`，`alpha` 控制 key-B 概率，加权 early-fusion 检测 `vllm/v1/watermarking/gumbel.py:208`）；`spec_decode.py` 新增 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker` 与 `allow_target_only_watermarking`；`_check_watermarking_unsupported`（`vllm/config/vllm.py:1162`）约束 `draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {dspark,eagle,eagle3,mtp}。详见 07 §7.1。
-  - **调度器 RUNNING 准入上限**：`SchedulerConfig.max_num_active_seqs`（`--max-num-active-seqs`，`vllm/config/scheduler.py:70`，`vllm/v1/core/sched/scheduler.py:129`，执行点 `vllm/v1/core/sched/scheduler.py:872-874`）；队列上限计数改用 `SharedAdmissionStats`（`vllm/v1/engine/admission_control.py:13`）跨进程无锁计数。详见 02 §2.2。
+  - **水印支持投机解码**：新增 `dual_key_gumbel` 算法（双 key gumbel-max，`supports_speculative_decoding=True`，`alpha` 控制 key-B 概率，加权 early-fusion 检测 `vllm/v1/watermarking/gumbel.py:208`）；`spec_decode.py` 新增 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker` 与 `allow_target_only_watermarking`；`_check_watermarking_unsupported`（`vllm/config/vllm.py:1213`）约束 `draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {dspark,eagle,eagle3,mtp}。详见 07 §7.1。
+  - **调度器 RUNNING 准入上限**：`SchedulerConfig.max_num_active_seqs`（`--max-num-active-seqs`，`vllm/config/scheduler.py:70`，`vllm/v1/core/sched/scheduler.py:127-129`，执行点 `vllm/v1/core/sched/scheduler.py:857-858`）；队列上限计数改用 `SharedAdmissionStats`（`vllm/v1/engine/admission_control.py:13`）跨进程无锁计数。详见 02 §2.2。
   - **投机解码自适应验证**：`enable_adaptive_verification`（`vllm/config/speculative.py:539`）+ `OnlineAcceptanceEstimator`（`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py:313`，501 行，log-odds 线性模型，Triton accumulate/refit/predict kernels）。详见 07 §1.3。
   - **KV offload 增强**：back-pressure（#50045，`vllm/v1/kv_offload/tiering/backpressure.py`）、KVCR（#53624，`vllm/v1/kv_offload/tiering/kvcr/`）、per-request `max_load_tokens`（#55885，`vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:367`）、chunked region 注册（#51081）、cgroup 检查（#54014）、MLA compact（#56799）。详见 02 §6.1。
-  - **Model Runner V2**：DBO FULL CUDA graph（#51700，`vllm/v1/worker/gpu/model_runner.py:1756`）；Fast Start 支持 nnode>1（#55468）。详见 03。
+  - **Model Runner V2**：DBO FULL CUDA graph（#51700，实现收敛在 `vllm/v1/worker/gpu/cudagraph_utils.py`）；Fast Start 支持 nnode>1（#55468）。详见 03。
   - **分布式**：MoonEP BF16 all2all backend（#52101，`vllm/model_executor/layers/fused_moe/prepare_finalize/moonep.py`）；DeepEPv2 async finalize（#52781/#57236）；PCP+DCP on sparse-MLA（#56157）；PCP decode-only FULL CUDA graphs（#53867）；NIXL attention-HMA PP push prefill（#50494）；Elastic EP CUDA graph 复用（#54985）。详见 05。
   - **Attention**：新增 `COMPOSITE` backend（`vllm/v1/attention/backends/composite.py`，Triton/FlashInfer 或 Triton/FlashAttention 组合，用于 multimodal prefix attention `mm_prefix`，selector 在 `use_mm_prefix=True` 时自动选择）。详见 04 §4.1。
   - **量化**：Quark 原生 W4A16 INT4/UINT4（#48606，`vllm/model_executor/layers/quantization/quark/schemes/quark_w4a16_int4.py`）；CPU FP8 W8A8 linear/MoE（#49942，`csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp` + `moe_fp8_w8a8.cpp`）。详见 06。
   - **部署**：新增 `POST /release_kv_cache_memory` 端点（#44890，`vllm/entrypoints/serve/dev/sleep/api_router.py:31`）；`--enable-scale-out` CLI flag 取代 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（#55176，`vllm/entrypoints/scale_out/factories.py:72`）。详见 08。
-  - **结构化输出重构**：`should_fill_bitmask`/`should_advance` 移除，改用 `_get_constraint_start`（`vllm/v1/structured_output/__init__.py:220`）/`validate_tokens`（`vllm/v1/structured_output/__init__.py:294`）；调度器 grammar 验证迁移到 `structured_output_manager.validate_tokens`（`vllm/v1/core/sched/scheduler.py:2526`）。详见 07。
+  - **结构化输出重构**：`should_fill_bitmask`/`should_advance` 移除，改用 `_get_constraint_start`（`vllm/v1/structured_output/__init__.py:220`）/`validate_tokens`（`vllm/v1/structured_output/__init__.py:294`）；调度器 grammar 验证迁移到 `structured_output_manager.validate_tokens`（`vllm/v1/core/sched/scheduler.py:2418/2446`）。详见 07。
   - **Engram**：新增 `embedding_across_dp`/`dp_shared_memory` 字段 + 异步预取 + DP 分片（#56512）。详见 07 §7.2。
 - **2026-09-20**：基线从 `751f6807d9`（2026-09-19，v0.30.0rc2）推进到 `4868312128`（2026-09-20，最新 tag 仍为 **v0.30.0rc2**，`fa6ff06066`）。区间 30 commits。主要变更：
   - **Humming 特性整合**（#56685）：`utils/humming_utils.py` 拆成 `utils/humming/` 包（`schema.py`/`activation.py`/`linear.py`/`moe.py`），新增 `mxfp6/humming.py` kernel 与 `WeightScale2Type`/`InputQuantizationMode`/`MmaType` 等 schema 类型；显式 input schema 默认禁用 fallback（`allow_fallback` 控制）；Marlin 与 Humming 共享持久 workspace（#57421，`vllm/v1/worker/workspace.py` 新增 `get_persistent_resource`/`get_persistent`）。详见 06。
@@ -238,3 +251,12 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
   - **sleep 时 KV connector cache reset 失败上抛**（#54581）：`EngineCore` 的 `reset_prefix_cache` 返回 False 时抛 `RuntimeError`（`vllm/v1/engine/core.py:874`），`pause_generation` 的 idle callback 异常经 future 传播而非吞掉。
   - **MoRIIO KV connector 大改**（#51052，+2746 行）：READ 模式传输 hybrid mamba/KDA recurrent state，`moriio_connector.py`/`moriio_layout.py` 重写。
   - 其他：spec decode dummy draft 步不再经 stale block-table 行写 KV（#56734，`vllm/v1/worker/gpu/spec_decode/speculator.py`）；DSV4.1 mHC 小 TP batch 系数 overlap（#57603）；ROCm Engram 表留 host 内存（#57491）；HY4 full CUDA graph capture 记录 indexer completion event（#57811）；XPU communicator world_size 可见性修复（#57779）；Kthena/EPD 文档更新。详见 02/03/06/07。
+- **2026-09-21（第二次）**：基线从 `86ce4d10e2`（2026-09-21，v0.30.0rc2）推进到 `8b98b7d0b4`（2026-09-21，最新 tag 仍为 **v0.30.0rc2**，`fa6ff06066`；main 已领先 `v0.30.0` release 分支 310+ commits）。区间 27 commits。主要变更：
+  - **AuxOutput Connector**（#45635，`vllm/distributed/aux_output_connector/` + `config/aux_output.py`）：MoE routed-expert 输出按 **KV block hash** 为键持久化到进程内 mmap arena（LRU 驱逐、fail-closed），供外部按 prefix-cache block 读取；`AuxOutputConfig`（`enable_return_routed_experts`/`max_bytes`）挂在 `VllmConfig.aux_output_config`（`config/vllm.py:380`），兼容性校验 `_verify_aux_output_compatibility`（`config/vllm.py:1091`，要求 V2 runner + MoE + prefix caching，拒绝 PP>1/DCP/PCP>1/KV connector）；scheduler 钩子 `scheduler.py:394/1475/1536/2074/2564`。详见 05 §9.4、02 §2.5。
+  - **DSV4.1 mHC 三连**：TP all-reduce 与 mHC 输入准备融合为 MNNVL Lamport multicast CUDA kernel（#57643，`models/deepseek_v41/nvidia/ops/mhc.py:46` `supports_mhc_all_reduce`，TP4/hidden5120/hc_mult4/CUDA_ARCH>=900）；mHC overlap 收紧到 full CUDA graph 捕获路径（#57874，`torch.cuda.is_current_stream_capturing()` 门控，`nvidia/model.py:384-391`）；ROCm 上禁用 SWA bounded replay（#57906，`models/deepseek_v41/attention.py`，window clamp 只在 FlashInfer/FlashMLA prefill kernel）。详见 05 §4.3、04 §4.2。
+  - **ROCm/XPU 平台**：Hy4 ROCm 路径 + backbone compile（#57526，`models/hy_v4/amd/model.py` +718 行）；MiniMax-M3 packed LBHNC AITER QK-norm 融合（#54535）；XPU fused top-k/top-p sampler kernel（#57277，`VLLM_XPU_USE_SAMPLER_KERNEL` 默认开，`topk_topp_sampler.py:129/151`，MRV2 同步接入）；`moe_align_block_size` 7-arg 回退（#57855）；DeepGEMM CUDA 12.9 构建修复（#57554，pin fork `e1f418c2`）。详见 06。
+  - **Mamba/KDA prefill checkpoint 通用化**（#57783）：`mamba/checkpoint.py` 抽出 `MambaPrefillCheckpointBuilder`/`Exporter`（ABC），`kda_checkpoint.py` 的 `FlashKDAPrefillCheckpointExporter` 复用，`kimi_k3/nvidia/kda.py`/`kda_metadata.py` 瘦身。详见 03 §3。
+  - **多模态 + 结构化输出 bugfix/安全**：receiver cache 优先采用新 payload（#57833，`multimodal/cache.py`，防 stale tensor 顶替新 payload 导致 EngineCore 崩溃）；Molmo2 容忍畸形 EXIF（#57234）；Whisper 30s 上限、Mistral3 grid、DiffusionGemma 修复；xgrammar list-valued `"type"` 归一化（#48416，`backend_xgrammar.py:247`）。详见 07。
+  - **Engram DP shared memory 默认开启**（#57651，`config/engram.py:52/86`）：同机 co-located DP replica 默认共享 n-gram 嵌入表 host 内存。详见 07 §7.2。
+  - **derender 流式解析文档化**（#57922，`docs/serving/online_serving/derenderer.md`）：scale-out derender 的无状态 `stream_state` 流式协议 + 流式 parity 测试。详见 07 §1。
+  - 其他：sparse attention metadata 去冗余（#57885，`mla/indexer.py`/`sparse_swa.py`）；8 个 CI-only commits（XPU/ROCm/Intel job 调整）。

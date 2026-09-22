@@ -1,6 +1,6 @@
 # 核心架构与请求生命周期
 
-> 基于 vLLM main（`86ce4d10e2`，2026-09-21）源码，最新 tag **v0.30.0rc2**（release candidate）（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
+> 基于 vLLM main（`d90f0eade5`，2026-09-22）源码，最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
 
 ## 1. v1 与旧版 (v0) 引擎
 <!-- tags: v1, engine, 引擎 -->
@@ -15,9 +15,9 @@ v1 是 vLLM 重写的引擎，当前版本中 **v0 引擎已完全移除**，`vl
 v1 相对 v0 的关键架构变化：
 
 1. **前后端进程解耦**：调度器 (Scheduler) 与模型执行 (Model Runner) 运行在独立的 **EngineCore 进程** 中，前端 (API server / LLM 客户端) 通过 **ZMQ** 与之通信。v0 是单进程内 `step()` 轮询。
-2. **连续批处理 (continuous batching) 原生内建**：不再有显式的 "prefill phase / decode phase"，调度器每步只关心让每个请求的 `num_computed_tokens` 追上 `num_tokens_with_spec`（见 `vllm/v1/core/sched/scheduler.py:570` 的注释）。
+2. **连续批处理 (continuous batching) 原生内建**：不再有显式的 "prefill phase / decode phase"，调度器每步只关心让每个请求的 `num_computed_tokens` 追上 `num_tokens_with_spec`（见 `vllm/v1/core/sched/scheduler.py:555` 的注释）。
 3. **KV cache 用 block pool + 前缀缓存**：`KVCacheManager` / `BlockPool`（`vllm/v1/core/`），请求级 `block_hashes` 支持 prefix caching。
-4. **异步调度 (async scheduling)**：`SchedulerConfig.async_scheduling`（默认在 `VllmConfig.__post_init__` 中按 executor 能力自动开启），让 GPU 前向与下一步调度重叠，`max_concurrent_batches` 因此为 2（`vllm/config/vllm.py:585`）。
+4. **异步调度 (async scheduling)**：`SchedulerConfig.async_scheduling`（默认在 `VllmConfig.__post_init__` 中按 executor 能力自动开启），让 GPU 前向与下一步调度重叠，`max_concurrent_batches` 因此为 2（`vllm/config/vllm.py:589`）。
 5. **`vllm/sequence.py` 已不再是请求载体**：v1 用 `vllm/v1/request.py` 的 `Request` 对象 + `EngineCoreRequest`/`EngineCoreOutput`（msgspec.Struct）作为进程间消息。`vllm/sequence.py` 现在只剩 `IntermediateTensors`（PP 中间张量容器）。
 
 ## 2. 进程与线程模型
@@ -133,18 +133,19 @@ engine_core.add_request_async(request)   (AsyncMPClient, core_client.py:1253)
   ▼
 input_queue → run_busy_loop → step_fn
   │
-  ├─ Scheduler.schedule()          (vllm/v1/core/sched/scheduler.py:570)
+  ├─ Scheduler.schedule()          (vllm/v1/core/sched/scheduler.py:555)
   │    分配 KV blocks、算 num_scheduled_tokens → SchedulerOutput
   ├─ ModelExecutor.execute_model(scheduler_output, non_block=True)
-  │    └─ [Worker 进程] GPUModelRunner.execute_model  (vllm/v1/worker/gpu_model_runner.py:4197)
+  │    └─ [Worker 进程] GPUModelRunner.execute_model  (vllm/v1/worker/gpu_model_runner.py:4151)
   │         _update_states → _prepare_inputs → 模型前向 → 返回 logits (不采样)
   ├─ Scheduler.get_grammar_bitmask(scheduler_output)   (结构化输出)
   ├─ ModelExecutor.sample_tokens(grammar_output)
-  │    └─ [Worker 进程] GPUModelRunner.sample_tokens  (gpu_model_runner.py:4578)
+  │    └─ [Worker 进程] GPUModelRunner.sample_tokens  (gpu_model_runner.py:4532)
   │         apply_grammar_bitmask → Sampler.forward  (vllm/v1/sample/sampler.py:72)
   │         → ModelRunnerOutput (sampled_token_ids, logprobs, ...)
   └─ Scheduler.update_from_output(scheduler_output, model_runner_output)
-       (scheduler.py:1922)  更新请求状态、检测 finish、释放/保留 blocks
+       (scheduler.py:1900)  更新请求状态、检测 finish、释放/保留 blocks
+       （aux_output_config.enabled 时另取回 routed-expert 输出，见 05 §9.4）
        → dict[client_index, EngineCoreOutputs]
   ▼
 output_queue → process_output_sockets 线程 → ZMQ PUSH
@@ -173,7 +174,7 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 ## 5. 核心配置体系
 <!-- tags: config, vllmconfig, 配置 -->
 
-### VllmConfig（`vllm/config/vllm.py:354`）
+### VllmConfig（`vllm/config/vllm.py:355`）
 <!-- tags: vllmconfig, dataclass, 子配置, 字段 -->
 
 聚合所有子配置的 dataclass。主要字段：
@@ -195,8 +196,9 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 | `observability_config` | `ObservabilityConfig` | `config/observability.py` |
 | `compilation_config` | `CompilationConfig` | `config/compilation.py` |
 | `kv_transfer_config` | `KVTransferConfig \| None` | `config/kv_transfer.py` |
+| `aux_output_config` | `AuxOutputConfig`（**v0.30 新增**，#45635，`config/vllm.py:380`） | `config/aux_output.py` |
 | `quant_config` | `QuantizationConfig \| None` | `config/quantization.py` |
-| `optimization_level` | `OptimizationLevel`（默认 O2） | `config/vllm.py:436` |
+| `optimization_level` | `OptimizationLevel`（默认 O2） | `config/vllm.py:439` |
 | `performance_mode` | `"balanced"/"interactivity"/"throughput"` | `config/vllm.py` |
 
 > 注意：本版本**没有独立的 `DecodingConfig`**（vLLM 早期有，现已并入 `ModelConfig`/`SamplingParams`）。
@@ -204,16 +206,16 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 ### 配置解析链
 <!-- tags: config, 解析链, engineargs, post-init, 推导 -->
 
-1. **CLI / 代码参数 → `EngineArgs`**（`vllm/engine/arg_utils.py:446`）：`EngineArgs` 是一个扁平 dataclass，字段名与 CLI flag 一一对应（如 `tensor_parallel_size`、`gpu_memory_utilization`、`max_num_batched_tokens`）。`AsyncEngineArgs(EngineArgs)`（`:2870`）加 `enable_log_requests` 等。
-2. **`EngineArgs.create_engine_config(usage_context)`**（`arg_utils.py:2055`）：按序构造各子 config —— `create_model_config()` → `CacheConfig` → `ParallelConfig` → `create_speculative_config()` → `SchedulerConfig` → `LoRAConfig` → `AttentionConfig` → ... → 组装 `VllmConfig`。期间做大量默认值推导与合法性校验（如 DP 模式互斥、`max_num_batched_tokens`/`max_num_seqs` 默认值由 `_set_default_max_num_seqs_and_batched_tokens_args` 定）。
-3. **`VllmConfig.__post_init__`**（`vllm.py:1273`）：做跨 config 的最终推导，例如按 executor 能力决定 `async_scheduling`（`vllm.py:1418-1467`）、设 `distributed_executor_backend`、算 `max_concurrent_batches` 等。
+1. **CLI / 代码参数 → `EngineArgs`**（`vllm/engine/arg_utils.py:447`）：`EngineArgs` 是一个扁平 dataclass，字段名与 CLI flag 一一对应（如 `tensor_parallel_size`、`gpu_memory_utilization`、`max_num_batched_tokens`）。`AsyncEngineArgs(EngineArgs)`（`:3025`）加 `enable_log_requests` 等。
+2. **`EngineArgs.create_engine_config(usage_context)`**（`arg_utils.py:2066`）：按序构造各子 config —— `create_model_config()` → `CacheConfig` → `ParallelConfig` → `create_speculative_config()` → `SchedulerConfig` → `LoRAConfig` → `AttentionConfig` → ... → 组装 `VllmConfig`。期间做大量默认值推导与合法性校验（如 DP 模式互斥、`max_num_batched_tokens`/`max_num_seqs` 默认值由 `_set_default_max_num_seqs_and_batched_tokens_args` 定）。
+3. **`VllmConfig.__post_init__`**（`vllm.py:1324`）：做跨 config 的最终推导，例如按 executor 能力决定 `async_scheduling`（`vllm.py:1437-1515`）、设 `distributed_executor_backend`、算 `max_concurrent_batches` 等。
 4. **环境变量**：`vllm/envs.py` 集中定义（`VLLM_ENABLE_V1_MULTIPROCESSING`、`VLLM_ENGINE_READY_TIMEOUT_S`、`VLLM_V1_OUTPUT_PROC_CHUNK_SIZE`、`VLLM_LOG_STATS_INTERVAL` 等），`EngineArgs` 字段默认值多取自对应 config 的默认值，CLI 未显式给时回落到 env / config 默认。
 5. **JSON / dict**：`compilation_config`、`speculative_config`、`kv_transfer_config`、`attention_config` 等支持传 dict，在 `LLM.__init__`（`entrypoints/llm.py:260` 的 `_make_config`）或 `create_engine_config` 里转成对应 config 实例。
 
 ### 关键子配置字段速查
 <!-- tags: config, 字段, modelconfig, cacheconfig, schedulerconfig -->
 
-- **`ModelConfig`**（`config/model.py:124`）：`model`、`runner`（`auto/generate/pooling`）、`dtype`、`max_model_len`、`quantization`、`enforce_eager`、`seed`、`trust_remote_code`、`tokenizer_mode`、`enable_sleep_mode`、`pooler_config`。
+- **`ModelConfig`**（`config/model.py:124`）：`model`、`runner`（`auto/generate/pooling`）、`dtype`、`max_model_len`、`quantization`、`enforce_eager`、`seed`、`trust_remote_code`、`tokenizer_mode`、`enable_sleep_mode`、`sleep_preserve_parameter_names`（**v0.30**，level-2 sleep 保留参数 glob）、`pooler_config`；`supports_multimodal_inputs` 现为**缓存属性**（**v0.30** #57913，从 `MultiModalRegistry` 迁入，见 07 §5.1）。
 - **`CacheConfig`**（`config/cache.py:68`）：`gpu_memory_utilization`（默认 0.92）、`kv_cache_memory_bytes`、`block_size`、`enable_prefix_caching`（默认 True）、`kv_cache_dtype`、`num_gpu_blocks`（运行时 profile 后填）。
 - **`SchedulerConfig`**（`config/scheduler.py:26`）：`max_num_batched_tokens`（默认 2048）、`max_num_seqs`（默认 128）、`enable_chunked_prefill`、`policy`（`scheduling_policy`）、`async_scheduling`、`stream_interval`（默认 1）、`scheduler_cls`、`watermark`、`prefill_schedule_interval`。
 - **`ParallelConfig`**（`config/parallel.py:124`）：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`distributed_executor_backend`（`mp`/`ray`/`uni`/`external_launcher`）、`enable_expert_parallel`、`data_parallel_external_lb`/`hybrid_lb`、`enable_elastic_ep`、`numa_bind`。
@@ -236,6 +238,7 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 - `LLM` 构造时 `disable_log_stats=True`（`llm.py:228`），并禁止单进程 `data_parallel_size>1`（`llm.py:283`，会挂起）。
 - `AsyncLLM` 支持 streaming input（`AsyncGenerator[StreamingInput]`，`async_llm.py:458`）、`data_parallel_rank` 路由、reasoning parser 等在线特性。
 - 两者都通过 `InputProcessor`（`v1/engine/input_processor.py:39`）把 prompt 转 `EngineCoreRequest`，通过 `OutputProcessor`（`v1/engine/output_processor.py:464`）把 `EngineCoreOutput` 转 `RequestOutput`。区别只在 `OutputProcessor` 是否带 per-request 队列（`RequestOutputCollector`）。`InputProcessor` 还在构造时加载自定义 logits processor 类并缓存 per-request 参数校验器（`_build_logits_processors_params_validator`，#56497），准入时按 V1/V2 runner 分别走 `validate_logits_processors_parameters` 或 `build_custom_logits_processors_params_validator`。
+- **v0.30 增量**：`InputProcessor.process_inputs` 新增 `kv_hints`（`KvHintsEnvelope`，#53423）参数并透传到 `EngineCoreRequest`/`Request`（可编程 KV 管理提示，见 02 §3.3）；`max_tokens` 未设时按 `max_model_len - prompt_len` 填充后校验 `min_tokens <= max_tokens`（#57731）；prompt embeds 的 `is_token_ids` 长度须与 `prompt_embeds` 一致（#57006）。
 
 ## 7. 关键文件
 <!-- tags: files -->
@@ -252,6 +255,8 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 | `vllm/v1/engine/utils.py` | ZMQ 地址分配、`launch_core_engines`、`CoreEngineProcManager` |
 | `vllm/v1/engine/coordinator.py` | `DPCoordinator`（DP 内部负载均衡协调） |
 | `vllm/v1/request.py` | `Request`、`RequestStatus` |
+| `vllm/v1/kv_hints/` | **v0.30 新增**：`KvHintsEnvelope`/`KvHintAction`（可编程 KV 管理提示信封） |
+| `vllm/snapshot/` | **v0.30 新增**：initialized engine snapshots（CRIU 引擎快照 runtime/server/manifest） |
 | `vllm/v1/core/sched/scheduler.py` | `Scheduler.schedule()` / `update_from_output()` |
 | `vllm/v1/core/sched/async_scheduler.py` | `AsyncScheduler`（async scheduling） |
 | `vllm/v1/core/kv_cache_manager.py` / `block_pool.py` | KV cache 块管理、前缀缓存 |
