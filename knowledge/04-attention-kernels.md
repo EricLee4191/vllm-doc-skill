@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 
@@ -74,7 +74,7 @@ v1 的 scheduler 把每个 step 的 batch 拆成 **prefill 段**（query_len > 1
 - **FLASH_ATTN**：统一走 `flash_attn_varlen_func`（`flash_attn.py:1504`），prefill 与 decode 用同一个 varlen kernel，靠 `cu_seqlens_q`/`seqused_k`/`block_table` 区分。KV cache 逻辑 shape `(B, H, N, 2*D)`，forward 里 `kv_cache.transpose(1,2).split(head_size)` 拆出 K/V。支持 cascade attention（`use_cascade` 分支）。
 - **FLASHINFER**：`FlashInferMetadata` 显式分 `prefill`（`FIPrefill`/`TRTLLMPrefill`）与 `decode`（`FIDecode`/`FlashInferTrtllmAPIDecode`）两个 wrapper（`flashinfer.py:642`）。decode kernel 由 `FlashInferDecodeKernel` 枚举选择：`XQA`（SM90）或 `TRTLLM_GEN`（SM100 trtllm-gen）。prefill 可选 TRTLLM ragged kernel。这是"prefill/decode 分路"最典型的 backend。
 - **TRITON_ATTN**：默认走 `unified_attention`（`triton_attn.py:663`，`vllm/v1/attention/ops/triton_unified_attention.py` 的 `kernel_unified_attention`），单 kernel 同时处理 prefill+decode；`AttentionConfig.use_prefill_decode_attention=True` 时改用分离的 `context_attention_fwd`（prefill）+ decode kernel。
-- **MLA**：`MLAAttention.forward_impl`（`mla_attention.py:875`）按 `num_mqa_tokens`（decode）/`num_mha_tokens`（prefill）切分：decode 段调 `impl.forward_mqa()`，prefill 段调 `impl.forward_mha()`（若实现）。prefill 后端由独立的 `MLAPrefillBackendEnum` 选择（见 §4.2）。
+- **MLA**：`MLAAttention.forward_impl`（`mla_attention.py:893`）按 `num_mqa_tokens`（decode）/`num_mha_tokens`（prefill）切分：decode 段调 `impl.forward_mqa()`，prefill 段调 `impl.forward_mha()`（若实现）。prefill 后端由独立的 `MLAPrefillBackendEnum` 选择（见 §4.2）。
 - **SSM/线性注意力（GDN 等）**：`backends/recoverssm_metadata.py` 的 `RecoverSSMMetadata` 抽象负责 spec decode 下 SSM 状态的"回滚/恢复"——`commit_recoverssm_state(num_accepted_tokens)` 按实际接受 token 数产出 `RecoverSSMPostprocessMetadata`（供 align-mode 前缀缓存的 postprocess）。这是混合架构（Gated DeltaNet 等）+ 投机解码的配套机制。
 
 CUDA Graph 支持等级由 builder 的 `_cudagraph_support` 决定：FLASH_ATTN 在 FA3 下为 `ALWAYS`（支持混合 prefill-decode），FA2 下为 `UNIFORM_BATCH`；TRITON_ATTN 为 `ALWAYS`。
@@ -100,7 +100,7 @@ CUDA Graph 支持等级由 builder 的 `_cudagraph_support` 决定：FLASH_ATTN 
 ### 4.2 MLA 专用
 <!-- tags: mla, backend, flashmla, cutlass, prefill -->
 
-MLA（DeepSeek 系列）的 KV cache 存 latent（`kv_c` + `k_pe`），backend 需实现 `forward_mha`（prefill）+ `forward_mqa`（decode）。`MLACommonBackend` 基类在 `mla_attention.py:1568`。
+MLA（DeepSeek 系列）的 KV cache 存 latent（`kv_c` + `k_pe`），backend 需实现 `forward_mha`（prefill）+ `forward_mqa`（decode）。`MLACommonBackend` 基类在 `mla_attention.py:1569`。
 
 - **FLASHMLA**（`mla/flashmla.py`）：DeepSeek 官方 FlashMLA kernel（`vllm._flashmla_C`），dense 仅 SM90，sparse 支持 SM90+SM100。block_size 固定 64。
 - **FLASHINFER_MLA**（`mla/flashinfer_mla.py`）：SM100 首选 MLA decode。
@@ -114,6 +114,7 @@ MLA（DeepSeek 系列）的 KV cache 存 latent（`kv_c` + `k_pe`），backend �
   - **sparse MLA 准备开销削减（#57458）**：`mla/sparse_utils.py` 的 index-remap Triton kernel 重构（`ConvertReqIndexToGlobalIndexKernel.sparse_mla_index_remap_kernel`，`NUM_TOPK_TOKENS` 提升为 constexpr、multi-tile 支持），降低 GLM 系 sparse MLA 的 metadata 准备成本。
   - **ROCm DSV4 自适应验证（#52362）**：`mla/indexer.py` 的 `DeepseekV4IndexerBackend.supports_device_cpu_query_lens_mismatch` 在 ROCm 上返回 True（adaptive verification 走 per-token flattened indexer 路径，row ownership 从 device decode lengths 推导）；V4.1 不继承该放宽（仅验证过 V4 路径）。
   - **GDN stateless first-chunk 分类修复（#51565，`backends/gdn_attn.py`）**：无 spec mask 时改用 `seq_lens_cpu_upper_bound <= query_len` 判定"无先前状态"（首 chunk 按 prefill 处理以 mask 回收的 state），并用 `is_prefilling` 排除 capture batch（其 `seq_len == query_len` 但非 prefill）；尾 padding 从 prefill 计数中剔除。
+  - **v0.30.1rc0 区间**：SM120 NoPE sparse MLA（#55277）——`csrc/libtorch_stable/cache_kernels.cu` 的 `concat_and_cache_ds_mla_kernel` 在 `pe_dim == 0`（NoPE）时把保留的 RoPE 尾部清零，SM120 上 NoPE sparse MLA 不再读到未初始化内存。Kimi-K3 变长 decode（#52988）——`FlashInferMLADecodeMetadata` 数据类化（`flattened_block_table`/`seq_lens`/`row_req`/`query_len`/`query_start_loc`/`max_query_len`），`_cudagraph_support = ALWAYS`、`query_len_support = VARLEN`；`flashattn_mla`/`flashmla`/`rocm_aiter_mla` 的 metadata builder 签名新增 `max_query_len` 参数；`kimi_k3/nvidia/kda_metadata.py` 的 `KimiK3KDAMetadataBuilder` 同样 `ALWAYS` + `supports_device_cpu_query_lens_mismatch()=True`；`model_states/mamba_hybrid.py` 的 max_query_len 优先取 `input_batch.max_query_len`。
 
 **MLA prefill 后端**独立选择（`mla/prefill/selector.py`），`MLAPrefillBackendEnum`：`FLASH_ATTN` / `FLASHINFER` / `TRTLLM_RAGGED` / `TOKENSPEED_MLA` / `ROCM_AITER_FA` / `CPU_NATIVE`。优先级（`_get_mla_prefill_backend_priorities`）：SM100 且 DSV3 维度（192/64/256）时 `TRTLLM_RAGGED` 优先；否则 `FLASH_ATTN` 优先。可用 `AttentionConfig.mla_prefill_backend` 显式指定。
 

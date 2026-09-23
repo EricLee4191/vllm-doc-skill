@@ -1,6 +1,6 @@
 # 调度器与 KV Cache 管理
 
-> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 总体架构
 <!-- tags: scheduler, overview, 调度器 -->
@@ -248,7 +248,7 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 | `prefill_schedule_interval` | `SchedulerConfig:143` | DP 部署 prefill 节流周期 |
 | `block_size` | `CacheConfig:61` | 物理块 token 数，默认 16；须与 attention backend 兼容 |
 | `prefix_match_unit` | `CacheConfig:68` | 前缀哈希粒度（hash_block_size），可细于 block_size |
-| `enable_prefix_caching` | `CacheConfig:107` | 默认 True |
+| `enable_prefix_caching` | `CacheConfig:107` | 默认 True；**v0.30.1rc0 区间**：encoder-only 模型在 model config hooks 之前自动禁用（#58287，`config/vllm.py:1343-1353`），避免 encoder-only attention 的 prefix caching 语义错误 |
 | `prefix_caching_hash_algo` | `CacheConfig:109` | sha256 / xxhash（+`_cbor` 变体） |
 | `gpu_memory_utilization` | `CacheConfig:80` | 默认 0.92；KV 显存 = 该比例 - 权重 - 激活 - cudagraph |
 | `kv_cache_memory_bytes` | `CacheConfig:201` | 直接指定 KV 字节数，覆盖 gpu_memory_utilization |

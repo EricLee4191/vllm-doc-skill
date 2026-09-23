@@ -1,6 +1,6 @@
 # 量化与多硬件平台
 
-> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的量化体系分两条主线：
@@ -48,7 +48,7 @@ vLLM 的量化体系分两条主线：
   - **在线（BF16 权重加载时量化）**：`online/fp8.py` 的 `Fp8PerTensorOnlineLinearMethod` 等，`QuantizeMethodBase.uses_meta_device=True` 时权重先在 meta device 创建、逐层量化，降低加载峰值显存。
 - kernel 选择：`Fp8LinearMethod.create_weights` 调 `init_fp8_linear_kernel(activation_quant_key, weight_quant_key, ...)`（`fp8.py:360`）。dynamic + cutlass 支持时激活用 **per-token** scale（`kFp8DynamicTokenSym`）性能更好；无 FP8 硬件的 GPU 自动回退 **Marlin** weight-only FP8 kernel（`fp8.py:261` 注释）。
 - MoE：`select_fp8_moe_backend()` 按 (weight_key, activation_key) 选后端（triton / cutlass / deep_gemm / flashinfer_trtllm 等）。
-- ROCm MI300/MI325 用 FNUZ 格式，加载时 `normalize_e4m3fn_to_e4m3fnuz()` 转换（定义于 `vllm/model_executor/layers/quantization/utils/w8a8_utils.py:109`，`fp8.py:69` 导入、`:758` 调用）。
+- ROCm MI300/MI325 用 FNUZ 格式，加载时 `normalize_e4m3fn_to_e4m3fnuz()` 转换（定义于 `vllm/model_executor/layers/quantization/utils/w8a8_utils.py:109`，`fp8.py:69` 导入、`:758` 调用）。**v0.30.1rc0 区间**：FP8/MLA 权重变换重构（#57732）——`process_fp8_weight_*_strategy` 改为返回转置后的 (K,N) 权重，调用方去掉 `.t()`；新增共享纯函数 `split_kv_b_proj()`（`mla_attention.py:407`），`mla_attention.py` 与 `kimi_k3/nvidia/mla.py` 复用。
 - 精度/速度/显存：W8A8，权重显存减半、GEMM 走 FP8 tensor core（Hopper/Blackwell 2x 吞吐）；精度损失通常 <0.1%（per-tensor 略差于 per-block）。**H100/B200 上首选**。
 
 **AWQ（`auto_awq.py`，`AutoAWQConfig`，min capability 75）**
@@ -66,7 +66,7 @@ vLLM 的量化体系分两条主线：
 
 **ModelOpt（`modelopt.py`，NVIDIA TensorRT-Model-Optimizer 产物）**
 - `ModelOptFp8Config`（min capability 80）：FP8 W8A8，支持 per-tensor / per-channel-per-tensor（`ModelOptFp8PcPtLinearMethod`）/ per-block weight-only（`ModelOptFp8PbWoLinearMethod`）三种 linear method；可带 KV cache 量化（`kv_cache_quant_method`）。
-- `ModelOptNvFp4Config`（`modelopt_fp4`，min capability 75）：NVFP4（fp4_e2m1 + fp8 block scale，group_size=16），Blackwell 最优显存/吞吐组合；有 W4A16 变体 `ModelOptNvFp4W4A16LinearMethod`。
+- `ModelOptNvFp4Config`（`modelopt_fp4`，min capability 75）：NVFP4（fp4_e2m1 + fp8 block scale，group_size=16），Blackwell 最优显存/吞吐组合；有 W4A16 变体 `ModelOptNvFp4W4A16LinearMethod`。**v0.30.1rc0 区间**：per-token NVFP4 MoE 后端（#57176）——`trtllm_nvfp4_moe.py` 现同时支持 `(kNvfp4Static, kNvfp4Dynamic)` 与 `(kNvfp4Static, kNvfp4DynamicToken)` 组合。
 - `ModelOptMxFp8Config`（`modelopt_mxfp8`，min capability 80）：MXFP8（e8m0 scale，1x32 block），Marlin kernel 支持 SM80+。
 - `ModelOptMixedPrecisionConfig`（`modelopt_mixed`）：混合精度（不同层不同 bit）。
 - 识别方式：`override_quantization_method` 读 `hf_quant_config.json` 里的 `quant_algo`（FP8/NVFP4/MXFP8）。
@@ -89,6 +89,7 @@ vLLM 的量化体系分两条主线：
   - **fallback 语义收紧**：显式 input schema（checkpoint 或 `VLLM_HUMMING_INPUT_QUANT_CONFIG`）默认**禁用** kernel fallback，除非配置含 `"allow_fallback": true`（`HummingLayerQuantizationConfig.allow_input_schema_fallback`）。
   - online-quant 的 Linear 层若 `input_size`/`input_size_per_partition` 非 32 对齐则回退 `UnquantizedLinearMethod`。
   - **共享持久 workspace**（#57421）：Marlin 与 Humming 的 MoE/linear 持久 scratch 现由 `WorkspaceManager.get_persistent_resource`/`get_persistent`（`vllm/v1/worker/workspace.py`）统一管理——按 (ubatch, lane) 缓存、lock 后禁止新增，避免各 kernel 各自分配。
+  - **v0.30.1rc0 区间**：wNaM 非对称量化（#46528，HEAD commit）——`HummingLinearMethod.apply` 传 `zero_point=getattr(layer, "zero_point", None)`（`humming.py:627`），`compressed_tensors_wNa16.py` 的 `WNA16_ZP_SUPPORTED_TYPES_MAP` 从 {4,8} 扩到 {2,3,4,5,6,7,8}，wNaM（weight-norm, activation-min）带 zero-point 的不对称 checkpoint 不再报错。
 
 **在线量化（online/，`OnlineQuantizationConfig`，min capability 75）**
 - 无需预量化 checkpoint：加载 BF16/FP16 权重时逐层量化。`--quantization` 的 shorthand 在 `vllm/config/quantization.py:187` 的 `_ONLINE_SHORTHANDS`：
@@ -173,7 +174,7 @@ vLLM 的量化体系分两条主线：
   - MLA：SM100 → `[FLASHINFER_MLA, TOKENSPEED_MLA, CUTLASS_MLA, FLASH_ATTN_MLA, FLASHMLA, TRITON_MLA, *sparse]`（FP8 KV 时 FlashInfer 优先）；SM120 → `[TRITON_MLA, FLASHINFER_MLA_SPARSE_SM120]`；其他 → `[FLASH_ATTN_MLA, FLASHMLA, ...]`。
   - 每个候选调 `validate_configuration()` 过滤（如 block_size 不兼容），选优先级最高者；`--attention-backend` 可强制。
 - `check_and_update_config`（:321）：`worker_cls` 默认 `vllm.v1.worker.gpu_worker.Worker`；WSL2 + `--cpu-offload-gb` + cudagraph 的 pinned memory 警告。
-- 部署要点：FP8 需 SM89+（`torch._scaled_mm` 限制 e4m3fn）；DeepGEMM（`VLLM_USE_DEEP_GEMM`，默认开）用于 Hopper FP8 block GEMM；`VLLM_BATCH_INVARIANT=1` 时 FP8 linear 走 BF16 dequant 路径保证可复现（`fp8.py:440`）。**v0.30 增量**：DeepGEMM 构建修复（#57554，`cmake/external_projects/deepgemm.cmake`）——pinned 到 vLLM fork 的 `e1f418c2`（含 vllm-project/DeepGEMM#12 的 CUDA 12.x layout header fix），CUDA 12.9 release 构建恢复可用。
+- 部署要点：FP8 需 SM89+（`torch._scaled_mm` 限制 e4m3fn）；DeepGEMM（`VLLM_USE_DEEP_GEMM`，默认开）用于 Hopper FP8 block GEMM；`VLLM_BATCH_INVARIANT=1` 时 FP8 linear 走 BF16 dequant 路径保证可复现（`fp8.py:439`）。**v0.30 增量**：DeepGEMM 构建修复（#57554，`cmake/external_projects/deepgemm.cmake`）——pinned 到 vLLM fork 的 `e1f418c2`（含 vllm-project/DeepGEMM#12 的 CUDA 12.x layout header fix），CUDA 12.9 release 构建恢复可用。**v0.30.1rc0 区间**：`is_deep_gemm_supported()`（`utils/deep_gemm.py`）改为**先查 `is_supported_arch`** 再查其他条件（#58073），避免非 Hopper 架构上无谓的库探测；`VLLM_BATCH_INVARIANT` 下 NCCL>=2.31 时 `NCCL_ALGO="ring,tree;allreduce:tree"`（#58179，`determinism/batch_invariant.py`），XPU 平台同步支持 batch-invariant Dense/MoE 路径（#55881，`platforms/xpu.py`）；`QuantFP8` 新增 `forward_cuda` 类分派（#58136，`input_quant_fp8.py`），CUDA fallback 不再经虚调用重入 `_DecodeConcatQuantFP8`。
 
 **ROCm（`rocm.py`，`RocmPlatform` :488）**
 - `device_type="cuda"`（HIP 复用 torch.cuda API）、`dispatch_key="CUDA"`、`dist_backend="nccl"`（RCCL）、`device_control_env_var="CUDA_VISIBLE_DEVICES"`（也认 `ROCR_VISIBLE_DEVICES` 的 ray noset 变量）。

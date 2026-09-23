@@ -1,6 +1,6 @@
 # 模型执行与编译优化
 
-> 版本：基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 版本：基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的"模型执行层"由三层组成：
@@ -158,7 +158,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 - **Rotary embedding**（`rotary_embedding/`）：`RotaryEmbeddingBase`/`RotaryEmbedding`（`base.py`），`forward_cuda` 走 fused kernel；变体 `yarn_scaling_rope.py`、`ntk_scaling_rope.py`、`llama3_rope.py`、`mrope.py`（多模态）、`dual_chunk_rope.py` 等。
 - **Embedding / LMHead**（`vocab_parallel_embedding.py`）：`VocabParallelEmbedding`（:198，按 vocab 切）、`ParallelLMHead`（:521）。
 - **Logits**（`logits_processor.py:58`）：`LogitsProcessor` 做 scale/soft-cap/processor。
-- **MoE**（`fused_moe/`）：`FusedMoE`（`layer.py`）+ `modular_kernel.py`，含 `router/`、`experts/`、`prepare_finalize/`、`oracle/`；EP 用 all2all（`all2all_utils.py`）。
+- **MoE**（`fused_moe/`）：`FusedMoE`（`layer.py`）+ `modular_kernel.py`，含 `router/`、`experts/`、`prepare_finalize/`、`oracle/`；EP 用 all2all（`all2all_utils.py`）。**v0.30.1rc0 区间**：MoE gate 统一改用 `GateLinear`（#58234，`router/gate_linear.py`，接受 `quant_config`/`skip_bias_add`，`LL_BF16_MAX_TOKENS=16` 类属性），33 个模型文件从 `ReplicatedLinear` 切换；TritonExperts 在 EP 下对齐阶段直接丢弃路由到远端专家的 top-k slot（#58051，`skip_invalid`/`ignore_invalid_experts`），减少无效计算。
 - **MLA**（`mla.py`）、**Mamba/线性注意力**（`mamba/`、`lightning_attn.py`）。
 - **Mamba/KDA prefill checkpoint 通用化**（#57783）：`mamba/checkpoint.py` 抽出 `MambaPrefillCheckpointBuilder`（`:67`）/`MambaPrefillCheckpointExporter`（ABC，`:126`）+ `compute_mamba_prefill_checkpoints`（`:21`），把 prefill checkpoint 的偏移/块列计算与导出解耦；`mamba/kda_checkpoint.py` 的 `FlashKDAPrefillCheckpointExporter`（`:21`）+ `store_cache_checkpoints_kernel`（`:72`）是 KDA（Kimi-K3 等）的具体实现，`kimi_k3/nvidia/kda.py`/`kda_metadata.py` 相应瘦身（各 -100 行左右），复用通用 builder。
 
@@ -215,7 +215,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ### 5.2 捕获哪些 batch size（capture sizes）
 <!-- tags: cudagraph, capture-sizes, 批大小, 捕获, spec-decode -->
 
-`VllmConfig.post_init`（`config/vllm.py:1324`，`_set_cudagraph_sizes` `:2237`）计算 `cudagraph_capture_sizes`：
+`VllmConfig.post_init`（`config/vllm.py:1330`，`_set_cudagraph_sizes` `:2276`）计算 `cudagraph_capture_sizes`：
 - `max_cudagraph_capture_size` 默认 = `min(max_num_seqs * decode_query_len * 2, 512)`（Blackwell 数据中心卡为 1024），再 `min(max_num_batched_tokens)`。
 - 默认 sizes = `[1,2,4] + range(8,256,8) + range(256,max,16)`；`performance_mode="interactivity"` 时用 `range(1, min(max,32)+1)` 细粒度。
 - spec decode 时 `adjust_cudagraph_sizes_for_spec_decode`（`compilation.py:1536`）把 sizes 向上取整到 `uniform_decode_query_len`（=1+num_spec_tokens）的倍数。
@@ -257,7 +257,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ## 6. Warmup 与显存 profiling
 <!-- tags: warmup, memory-profiling, oom, 显存 -->
 
-入口 `Worker.compile_or_warm_up_model()`（`gpu_worker.py:773`）与 `Worker.determine_available_memory()`（:532）。
+入口 `Worker.compile_or_warm_up_model()`（`gpu_worker.py:807`）与 `Worker.determine_available_memory()`（:566）。
 
 ### 6.1 显存 profiling（`determine_available_memory`）
 <!-- tags: memory-profiling, 显存, profile-run, cudagraph-estimate, available-memory -->
@@ -275,11 +275,13 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ### 6.2 warmup / capture 顺序（`compile_or_warm_up_model`）
 <!-- tags: warmup, capture, 顺序, kernel-warmup, compile -->
 
-1. `VLLM_COMPILE` 模式下，对 `compile_sizes` 中不在 capture sizes 里的 size（如 `max_num_batched_tokens`）逐个 `_dummy_run` 编译（:721）。
+0. 开头先把 `pp_handler.set_disabled(True)`（#56956）：warmup 阶段跑的是合成步，PP sampled-token 广播无有效载荷，其 side-stream NCCL op 可能与下一步激活 p2p 重叠导致死锁，整个 warmup 窗口禁用、serve 前恢复（末尾 `set_disabled(False)`）。
+1. `VLLM_COMPILE` 模式下，对 `compile_sizes` 中不在 capture sizes 里的 size（如 `max_num_batched_tokens`）逐个 `_dummy_run` 编译。
 2. `kernel_warmup(worker)`（`model_executor/warmup/kernel_warmup.py:157`）：预热/autotune 推理期 kernel（Triton JIT、flashinfer 等），避免首请求 JIT 卡顿。
-3. `if not enforce_eager: capture_model()`（:732）——真正 capture 所有 cudagraph，返回实际占用的 `cuda_graph_memory_bytes`，与估算对比打日志。
-4. 打印建议的 `--kv-cache-memory`（:794），`maybe_save_startup_plan`（:806）。
-5. 末尾 `trigger_inductor_lazy_init`、`activate_jit_monitor`、`freeze_gc_heap`、`set_torch_threads_for_runtime`。
+3. V2 runner 的 `warmup_kernels(...)`（`gpu/warmup.py`）现在受 `kernel_config.enable_jit_warmup` 门控（#55146）——`enforce_eager` 时 `VllmConfig.__post_init__` 会把它置 False（#58197），eager 模式不再做 JIT warmup。
+4. `if not enforce_eager: capture_model()`——真正 capture 所有 cudagraph，返回实际占用的 `cuda_graph_memory_bytes`，与估算对比打日志。
+5. 打印建议的 `--kv-cache-memory`，`maybe_save_startup_plan`。
+6. 末尾 `set_random_seed`、`trigger_inductor_lazy_init`、`activate_jit_monitor`、`freeze_gc_heap`、`enable_gpu_sync_check`。注意 `set_torch_threads_for_runtime()` 已移到 `load_model` 末尾（#55891）——权重加载保持并行线程数，profiling/编译/推理前切回 serving 线程数，保证 Dynamo 全局状态守卫在请求到来时仍然有效。
 
 ### 6.3 Startup plan（启动计划持久化，`vllm/v1/worker/startup_plan.py`）
 <!-- tags: startup-plan, 启动计划, 持久化, fingerprint, 跳过profiling -->
@@ -321,7 +323,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 | `vllm/config/compilation.py` | `CompilationConfig` / `CUDAGraphMode` / `PassConfig` |
 | `vllm/forward_context.py` | `ForwardContext` / `BatchDescriptor`（attn metadata、cudagraph 模式载体） |
 | `vllm/model_executor/model_loader/` | 权重加载（`default_loader.py`、`weight_utils.py`、`base_loader.py`）；`utils.py` 的 `get_draft_load_config`（**v0.30**，draft 模型加载入口，Fast Start 下路由到 daemon draft group） |
-| `vllm/model_executor/model_loader/weight_cache/` | Fast Start IPC 权重缓存（daemon/ipc_loader/protocol），**v0.30** 支持 MTP draft 独立 draft group（#57312） |
+| `vllm/model_executor/model_loader/weight_cache/` | Fast Start IPC 权重缓存（daemon/ipc_loader/protocol），**v0.30** 支持 MTP draft 独立 draft group（#57312）；**v0.30.1rc0 区间** daemon 支持 DP（#57386，`dp_size*tp_size` 个 daemon 组成一个 world group，专家分片布局与引擎一致，可叠加多节点 TP；PP 仍拒绝） |
 | `vllm/model_executor/layers/` | 算子层（`attention/`、`linear.py`、`layernorm.py`、`activation.py`、`rotary_embedding/`、`fused_moe/`、`quantization/`） |
 | `vllm/model_executor/models/` | 380+ 模型架构定义（`llama.py` 为参考实现） |
 | `vllm/model_executor/warmup/` | kernel warmup / JIT warmup |
@@ -335,7 +337,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 
 ### CLI / 顶层
 <!-- tags: cli, 旋钮, enforce-eager, compilation-config, flags -->
-- `--enforce-eager`（`ModelConfig.enforce_eager`，`config/model.py:242`）：禁用 CUDA Graph + 编译，全 eager（调试/排障）。
+- `--enforce-eager`（`ModelConfig.enforce_eager`，`config/model.py:246`）：禁用 CUDA Graph + 编译，全 eager（调试/排障）。
 - `--compilation-config` / `-cc`（`arg_utils.py:1747`）：JSON 覆盖 `CompilationConfig`，如 `{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8]}`。
 - `--gpu-memory-utilization` / `--kv-cache-memory-bytes`（`arg_utils.py:1294`）：控制 KV 显存预算。
 - `--max-num-batched-tokens` / `--max-num-seqs`（:539/542）：决定 `max_cudagraph_capture_size` 上界与 capture sizes。

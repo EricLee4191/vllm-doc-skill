@@ -1,6 +1,6 @@
 # 投机解码与高级推理特性
 
-> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 本文覆盖 vLLM 的高级特性：**投机解码 (speculative decoding)**、**采样 (sampling)**、**结构化输出 (structured output)**、**LoRA 多适配器**、**多模态 (multimodal)**、**reasoning/思考模型支持**，以及 v0.29 新增的**文本水印 (watermarking)** 与 **Engram/PLE（n-gram 嵌入存储）**。重点讲架构与部署/调优旋钮。
 
@@ -76,10 +76,11 @@ class SpecDecodeMetadata:
 - `forward()`（`rejection_sampler.py:106`）：
   1. 从 `bonus_logits` 用普通 `Sampler` 采 bonus token（可带 top_p/top_k）。
   2. 对 `target_logits` 应用 logits processors（penalties / bad words / min_tokens / thinking budget）与 `apply_sampling_constraints`（temperature + top_k/top_p）。
-  3. `rejection_sample()`（`rejection_sampler.py:410`）：greedy 请求走 `rejection_greedy_sample_kernel`；随机请求先 `sample_recovered_tokens` 再 `rejection_random_sample_kernel`。
+  3. `rejection_sample()`（`vllm/v1/sample/rejection_sampler.py:410`）：greedy 请求走 `rejection_greedy_sample_kernel`；随机请求先 `sample_recovered_tokens` 再 `rejection_random_sample_kernel`。
 - 输出 `output_token_ids` 形状 `[batch_size, max_spec_len+1]`，被拒位置填 `PLACEHOLDER_TOKEN_ID=-1`，`parse_output()` 过滤。
 - `draft_probs` 可为 None（ngram 无概率分布，退化为确定性接受）。
 - `MAX_SPEC_LEN = 128`（`rejection_sampler.py:42`）是单步每请求 draft token 上限。
+- **v0.30.1rc0 区间**：异构 vocab spec decode 去掉 CPU-GPU 同步（#57396）——`vocab_mapping.py` 的 `draft_ids[draft_ids == -1] = self.draft_unk_token_id` 替代原 `.any()` 同步检查，消除每步一次 device→host 往返。Kimi-K3 变长 decode（#52988）：MLA/KDA metadata builder 支持 `max_query_len`（见 04 §4.2）。GLM MTP head 延迟加载（#55442）：`deepseek_mtp.py` 新增 `defer_lm_head` 参数，`glm5next/common/mtp.py` 传 `defer_lm_head=True`，MTP head 权重推迟到首次需要时加载，缩短启动时间。
 
 **rejection_sample_method**（`speculative.py:517`）：
 - `standard`：概率式拒绝采样（默认）。配合 `draft_sample_method`：
@@ -142,6 +143,11 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 **derender 流式解析文档化（v0.30 新增，#57922）**：`docs/serving/online_serving/derenderer.md` 补齐 scale-out derender 的流式语义——`stream: true` 时客户端携带 `stream_state`（**无状态协议**：server 不存流状态，state 由客户端回传），每次收一个 `GenerateStreamResponse` delta 返回 `{chunk, stream_state}`；chat 端点流式路径支持 reasoning + tool call 解析，产出与 generate 流式路径相同的 `reasoning`/`content`/`tool_calls` delta。配套 `entrypoints/scale_out/token_in_token_out/protocol.py` 的流式 parity 测试。
 
+**v0.30.1rc0 区间**：
+- **Granite 流式 tool-call 解析**（#49648）：`vllm/parser/granite.py`（新文件）为 Granite 3.0/3.1 的 JSON-array 格式 tool call 提供流式 Parser Engine 支持（`tool_call_body_array` 模式），`streaming_parser_engine.py` 新增 `_feed_array_text`/`_reset_array_state`；旧的 `tool_parsers/granite_tool_parser.py`（257 行）删除。
+- **length finish_reason 流式 tool call 修复**（#46303）：`chat_completion/serving.py` 仅在 `output.finish_reason == "stop"` 时才把 finish_reason 报为 `"tool_calls"`，避免流式中途因达到 `max_tokens` 误报 tool_calls。
+- **FIM completion 渲染**（#44229）：`BaseRenderer.render_completion_suffix(prompt, suffix)`（默认返回 None），`DeepseekV4Renderer` 实现为 `<｜fim▁begin｜>{prompt}<｜fim▁hole｜>{suffix}<｜fim▁end｜>`；online_renderer 在非 echo/prompt_embeds/truncate_prompt_tokens 时接受 suffix。
+
 ---
 
 ## 2. 采样 (Sampling)
@@ -173,7 +179,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 - logprobs：`logprobs`、`prompt_logprobs`、`logprob_token_ids`（generative_scoring 用，只取指定 token 的 logprob）、`flat_logprobs`。
 - `structured_outputs`（`StructuredOutputsParams`）、`logit_bias`、`allowed_token_ids`、`bad_words`、`thinking_token_budget`、`repetition_detection`。
 
-**beam search**：`SamplingParams` 仍保留 `beam_width` 字段（`sampling_params.py:1297`，"not supported by OpenAI"），但 v1 引擎没有 beam search 实现（`vllm/v1/` 下无 `beam_search` 代码）——beam search 属于已废弃的 V0 路径，v1 不支持。
+**beam search**：`SamplingParams` 仍保留 `beam_width` 字段（`sampling_params.py:1319`，"not supported by OpenAI"），但 v1 引擎没有 beam search 实现（`vllm/v1/` 下无 `beam_search` 代码）——beam search 属于已废弃的 V0 路径，v1 不支持。
 
 ---
 
@@ -185,7 +191,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 `StructuredOutputManager`（`vllm/v1/structured_output/__init__.py:36`）是 engine 级单例，管理一个 backend（V1 不支持 per-request 切换 backend）。
 
-- **backend 选择**：`StructuredOutputsConfig.backend`（`config/structured_outputs.py:21`）默认 `"auto"`。`auto` 模式在 `sampling_params.py:1191-1236`（`_validate_structured_outputs` 的 auto 分支）里按优先级尝试：先 `xgrammar`，失败则 `guidance`（Mistral 非 tekken tokenizer 或 schema 含 guidance 不支持特性时退到 `outlines`）。
+- **backend 选择**：`StructuredOutputsConfig.backend`（`config/structured_outputs.py:21`）默认 `"auto"`。`auto` 模式在 `sampling_params.py:1201-1246`（`_validate_structured_outputs` 的 auto 分支）里按优先级尝试：先 `xgrammar`，失败则 `guidance`（Mistral 非 tekken tokenizer 或 schema 含 guidance 不支持特性时退到 `outlines`）。
 - **backend 实现**：
   - `XgrammarBackend`（`backend_xgrammar.py:37`）：默认。`xgr.GrammarCompiler` + `GrammarMatcher`，`compile_grammar` 支持 `JSON`/`JSON_OBJECT`/`GRAMMAR`/`REGEX`/`STRUCTURAL_TAG`。
   - `GuidanceBackend`（`backend_guidance.py`）、`OutlinesBackend`（`backend_outlines.py`，SQLite 磁盘缓存 `OUTLINES_CACHE_DIR`）、`LMFormatEnforcerBackend`（`backend_lm_format_enforcer.py`）。
@@ -196,7 +202,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 ### 3.2 请求侧
 <!-- tags: structured-output, 请求, request, key, 异步编译 -->
 
-`StructuredOutputRequest`（`vllm/v1/structured_output/request.py:22`）由 `SamplingParams.structured_outputs` 构造，`structured_output_key` 区分类型（`get_structured_output_key`，`request.py:76`：JSON / JSON_OBJECT / REGEX / CHOICE / GRAMMAR / STRUCTURAL_TAG）。grammar 编译是异步的（`Future`），`is_grammar_ready` 轮询。**v0.30**：`_check_grammar_completion` 的 poll 改**非阻塞**（#55931）——`Future.done()` 检查替代 `result(timeout=0.0001)`（100µs 阻塞轮询在调度热路径上累积）。请求侧校验（`sampling_params.py`）：**拒绝空 `structural_tag`**（#47450，strip 后为空即 `VLLMValidationError`）；空 regex 仍合法（可编译成有效 grammar）。
+`StructuredOutputRequest`（`vllm/v1/structured_output/request.py:22`）由 `SamplingParams.structured_outputs` 构造，`structured_output_key` 区分类型（`get_structured_output_key`，`request.py:76`：JSON / JSON_OBJECT / REGEX / CHOICE / GRAMMAR / STRUCTURAL_TAG）。grammar 编译是异步的（`Future`），`is_grammar_ready` 轮询。**v0.30**：`_check_grammar_completion` 的 poll 改**非阻塞**（#55931）——`Future.done()` 检查替代 `result(timeout=0.0001)`（100µs 阻塞轮询在调度热路径上累积）。请求侧校验（`sampling_params.py`）：**拒绝空 `structural_tag`**（#47450，strip 后为空即 `VLLMValidationError`）；空 regex 仍合法（可编译成有效 grammar）。**v0.30.1rc0 区间**：DiffusionGemma 结构化生成（#57250，Jev-like）——扩散式 LM 也支持 grammar 约束：`vllm/utils/diffusion.py` 新增 `validate_diffusion_sampling_params`（canvas_length/vocab_size/async_scheduling 校验），`InputProcessor` 构造时加载 `diffusion_config` 并在准入时做 `is_diffusion` 检查；`diffusion_config` + `async_scheduling` + 未显式指定 `scheduler_cls` 时自动选 `DiffusionAsyncScheduler`（`vllm/v1/core/sched/diffusion_scheduler.py`，继承 `AsyncScheduler`，新增 `diffusion_canvas_width()`/`_read_in_flight()`）。
 
 ### 3.3 与投机解码 / reasoning 的交互
 <!-- tags: structured-output, 投机解码, reasoning, 交互, bitmask -->
@@ -312,7 +318,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 - **两种算法**（`WatermarkingAlgorithm`，`config/watermarking.py:15`）：
   - `gumbel`（默认）：单密钥 Gumbel-max，**不支持投机解码**（`supports_speculative_decoding` 属性为 `False`）。
   - `dual_key_gumbel`（v0.30 新增）：**双密钥** Gumbel-max，target 与 draft 各用一个密钥角色，`supports_speculative_decoding=True`；`alpha` 控制选 key B 的概率，检测用加权 early fusion（`gumbel.py:208`）。
-- **投机解码支持（v0.30 新增，#56122）**：`spec_decode.py` 提供 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker`，把 target/draft 拆成两个 watermarker 角色；`allow_target_only_watermarking=True` 时允许 draft token 不打水印。`_check_watermarking_unsupported`（`config/vllm.py:1213`）现在**允许**投机解码，但要求：`draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {`dspark`,`eagle`,`eagle3`,`mtp`}（自回归模型类），且非 `dspark` 时不允许 parallel drafting；否则（`gumbel` 算法且未开 `allow_target_only_watermarking`）仍报错。也不支持 beam search。**强制 Model Runner V2**。
+- **投机解码支持（v0.30 新增，#56122）**：`spec_decode.py` 提供 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker`，把 target/draft 拆成两个 watermarker 角色；`allow_target_only_watermarking=True` 时允许 draft token 不打水印。`_check_watermarking_unsupported`（`config/vllm.py:1219`）现在**允许**投机解码，但要求：`draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {`dspark`,`eagle`,`eagle3`,`mtp`}（自回归模型类），且非 `dspark` 时不允许 parallel drafting；否则（`gumbel` 算法且未开 `allow_target_only_watermarking`）仍报错。也不支持 beam search。**强制 Model Runner V2**。
 - 采样侧实现在 `vllm/v1/worker/gpu/sample/watermark.py`（V2 runner 的 sample 子模块）；`vllm/v1/watermarking/gpu_sampler.py` 提供 GPU 采样器封装。
 
 ### 7.2 Engram / PLE（n-gram 嵌入存储与分片）
@@ -326,6 +332,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 - 架构映射（`_NGRAM_LAYER_FIELDS`）：`DeepseekV41ForCausalLM→engram_layer_ids`、`Qwen4ExpForCausalLM/ForConditionalGeneration→ple_layer_ids`。
 - `VllmConfig.engram_config`（`config/vllm.py:382`）。
 - **v0.30 增量**：Engram **DP shared memory 默认开启**（#57651，`config/engram.py`）：`dp_shared_memory` 字段（`:52`）+ `resolve_dp_shared_memory`（`:86`）——同机 co-located 的多个 DP replica 默认共享 n-gram 嵌入表的 host 内存表（`models/deepseek_v41/nvidia/engram.py` 配套），避免每 replica 各占一份大表；ROCm 上 Engram 表留 host 内存（#57491，上一轮已记录）。
+- **v0.30.1rc0 区间**：`/dev/shm` 回退（#57914）——`models/deepseek_v41/nvidia/engram.py` 在共享表前检查 `os.path.isdir(SHM_PATH)`，`/dev/shm` 不可用时回退 per-rank 独立表，不再 crash。
 
 ---
 

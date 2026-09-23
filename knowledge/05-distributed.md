@@ -1,6 +1,6 @@
 # 分布式并行（TP/PP/DP/EP）与 KV 传输
 
-> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release；main 已领先该 release 分支 56+ commits，V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 > 核心目录：`vllm/distributed/`、`vllm/config/parallel.py`、`vllm/v1/executor/`、`vllm/v1/worker/`。
 
 ---
@@ -60,6 +60,7 @@ world_size_across_dp = world_size * data_parallel_size
 - 把模型按层切成若干 stage，每个 stage 占一部分 GPU；stage 间用 P2P `send`/`recv` 传 hidden states。
 - 适用：模型太大单机放不下，跨节点扩展。
 - `MultiprocExecutor.supports_pp = True`；`RayDistributedExecutor` 也支持。PP 组内相邻 rank 走 `send_tensor_dict`/`recv_tensor_dict`（`parallel_state.py` 中 `GroupCoordinator`）。
+- **v0.30.1rc0 区间**：DSpark 支持 PP（#56956）——`vllm/v1/worker/gpu/pp_utils.py` 的 `PPHandler` 新增 `set_disabled()`（warmup 窗口禁用 sampled-token 广播，见 03 §6.2）；`broadcast_drafts` 折叠进 `post_update`，`_alloc_combined()` 分配 (2,N) int32 buffer（pad 到 4 的倍数）；`gpu/model_runner.py` 新增 `warmup_pp_decode_update()`，`gpu/input_batch.py` 的 `broadcast_drafts` kernel 参数化。
 
 ### 2.3 Data Parallelism (DP)
 <!-- tags: dp, data-parallel, 数据并行, lb, padding -->
@@ -202,7 +203,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - 超过阈值或 world_size 不支持 → 落回 PyNCCL。
 - 需要 P2P 可访问（`gpu_p2p_access_check`，`VLLM_SKIP_P2P_CHECK` 可跳过检查）。
 - 跨节点（非同节点）时走 **MNNVL**（multicast）路径，`mnnvl_only=True`。
-- **DSV4.1 mHC 融合 all-reduce**（#57643）：DeepSeek V4.1 的 mHC（multi-head compression）层把 **TP all-reduce 与 mHC 输入准备融合**成一个 MNNVL Lamport multicast CUDA kernel（`torch.ops._C_custom_ar.all_reduce_mhc`）。门控 `supports_mhc_all_reduce`（`vllm/models/deepseek_v41/nvidia/ops/mhc.py:46`）：TP==4、无 EP、`hidden_size==5120`、`hc_mult==4`、`ca_comm.mnnvl_lamport_ag_multicast_ptr` 可用、CUDA_ARCH>=900。模型侧 `fuse_mhc_all_reduce = mhc_stream is not None and supports_mhc_all_reduce`（`nvidia/model.py:555`）；overlap 仅在 `torch.cuda.is_current_stream_capturing()` 时启用（`model.py:384-391`），即 **full CUDA graph 捕获路径专用**（#57874 收紧：DBO/PIECEWISE 图不走此路径）。小 batch（n<=16）走 `all_reduce_mhc`，否则回退 `tp.all_reduce`（`mhc_shifted_post_pre`，`mhc.py:153`，签名新增 `stream`/`reduce_results` 参数）。
+- **DSV4.1 mHC 融合 all-reduce**（#57643）：DeepSeek V4.1 的 mHC（multi-head compression）层把 **TP all-reduce 与 mHC 输入准备融合**成一个 MNNVL Lamport multicast CUDA kernel（`torch.ops._C_custom_ar.all_reduce_mhc`）。门控 `supports_mhc_all_reduce`（`vllm/models/deepseek_v41/nvidia/ops/mhc.py:46`）：TP==4、无 EP、`hidden_size==5120`、`hc_mult==4`、`ca_comm.mnnvl_lamport_ag_multicast_ptr` 可用、CUDA_ARCH>=900。模型侧 `fuse_mhc_all_reduce = mhc_stream is not None and supports_mhc_all_reduce`（`nvidia/model.py:586`）；overlap 仅在 `torch.cuda.is_current_stream_capturing()` 时启用（`model.py:413-420`），即 **full CUDA graph 捕获路径专用**（#57874 收紧：DBO/PIECEWISE 图不走此路径）。小 batch（n<=16）走 `all_reduce_mhc`，否则回退 `tp.all_reduce`（`mhc_shifted_post_pre`，`mhc.py:153`，签名新增 `stream`/`reduce_results` 参数）。
 
 ### 4.4 NCCL symmetric memory（NVLS）
 <!-- tags: symm-mem, nvls, nccl, 阈值, all-gather -->
@@ -261,7 +262,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - `WorkerBase`（`vllm/v1/worker/worker_base.py:44`）：硬件无关接口（`init_device`/`load_model`/`execute_model`/`sample_tokens`/`determine_available_memory` 等）。
 - `WorkerWrapperBase`（`worker_base.py:212`）：单进程包装，`init_worker` 时按 `worker_cls`（`parallel_config.worker_cls`，默认 `"auto"` 按平台解析）动态实例化真实 worker，并支持 `worker_extension_cls` 注入属性/方法（供 `collective_rpc` 调用）。
 - GPU worker：`vllm/v1/worker/gpu_worker.py::Worker`（`init_device` 在 `:364`）。`init_device` 里做 DP local rank 到 `local_rank` 的映射（`local_rank += dp_local_rank * tp_pp_world_size`）、NUMA 绑定、物理 GPU id 映射等。
-- worker 内调 `init_distributed_environment`（`gpu_worker.py:1519`）+ `ensure_model_parallel_initialized`（`gpu_worker.py:1528`）建立进程组。
+- worker 内调 `init_distributed_environment`（`gpu_worker.py:1564`）+ `ensure_model_parallel_initialized`（`gpu_worker.py:1573`）建立进程组。
 
 ---
 
@@ -407,7 +408,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 <!-- tags: aux-output, routed-experts, moe, block-hash, mmap, lru, 专家路由 -->
 `vllm/distributed/aux_output_connector/`：把 MoE 每 token 的 **routed experts**（专家路由结果）按 **KV block hash** 为键持久化到进程内 mmap arena，供外部系统（如专家级 KV 复用/分析）按 prefix-cache block 读取。设计要点：
 - **配置** `AuxOutputConfig`（`vllm/config/aux_output.py`）：`enable_return_routed_experts: bool=False`（默认关）、`max_bytes: int|None`（arena 上限，None 时由 worker 推导）；挂在 `VllmConfig.aux_output_config`（`config/vllm.py:380`）。
-- **兼容性校验** `_verify_aux_output_compatibility`（`config/vllm.py:1091`）：要求 V2 model runner + generate runner + MoE + prefix caching；拒绝 adaptive spec verification、PP>1、DCP/PCP>1、KV connector 共存。
+- **兼容性校验** `_verify_aux_output_compatibility`（`config/vllm.py:1092`）：要求 V2 model runner + generate runner + MoE + prefix caching；拒绝 adaptive spec verification、PP>1、DCP/PCP>1、以及 5 个已知 PD KV connector（NixlConnector/NixlPullConnector/NixlPushConnector/MoRIIOConnector/MooncakeConnector，#58150 从"任意 KV connector"收窄为具名列表）共存。
 - **scheduler 侧** `AuxOutputSchedulerConnector`（`connector.py:44`）：随每步构建 `AuxOutputConnectorMetadata`（含 `PackedBlockHashes`，按请求打包 block hash）；请求结束时 `request_finished` 释放引用。scheduler 钩子在 `vllm/v1/core/sched/scheduler.py`：init `:394-396`、`build_connector_meta` `:1475-1477`、`request_finished` `:1536-1537` 与 `:2564-2565`、`take_output` `:2074-2076`。
 - **worker 侧** `AuxOutputWorkerConnector`（`worker.py:83`）：`max_bytes` 缺省推导为 `kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes`（`worker.py:122-127`）；`max_pending_batches = 2 * max_num_seqs`。
 - **存储** `BlockObjectStore`（`store.py:100`）：mmap arena + LRU 驱逐（`_evict_to_fit` `store.py:125`）；**fail-closed**——空间不足且无法驱逐时抛 `BlockObjectStoreError`（`store.py:23`）而不是静默丢弃；后台清理线程 `BackgroundBlockObjectStore`（`store.py:27`）。

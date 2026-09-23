@@ -1,6 +1,6 @@
 # 核心架构与请求生命周期
 
-> 基于 vLLM main（`d90f0eade5`，2026-09-22）源码，最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
+> 基于 vLLM main（`9f07d023d0`，2026-09-23）源码，最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认且唯一活跃引擎）。技术标识符保留英文。
 
 ## 1. v1 与旧版 (v0) 引擎
 <!-- tags: v1, engine, 引擎 -->
@@ -208,7 +208,7 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 
 1. **CLI / 代码参数 → `EngineArgs`**（`vllm/engine/arg_utils.py:447`）：`EngineArgs` 是一个扁平 dataclass，字段名与 CLI flag 一一对应（如 `tensor_parallel_size`、`gpu_memory_utilization`、`max_num_batched_tokens`）。`AsyncEngineArgs(EngineArgs)`（`:3025`）加 `enable_log_requests` 等。
 2. **`EngineArgs.create_engine_config(usage_context)`**（`arg_utils.py:2066`）：按序构造各子 config —— `create_model_config()` → `CacheConfig` → `ParallelConfig` → `create_speculative_config()` → `SchedulerConfig` → `LoRAConfig` → `AttentionConfig` → ... → 组装 `VllmConfig`。期间做大量默认值推导与合法性校验（如 DP 模式互斥、`max_num_batched_tokens`/`max_num_seqs` 默认值由 `_set_default_max_num_seqs_and_batched_tokens_args` 定）。
-3. **`VllmConfig.__post_init__`**（`vllm.py:1324`）：做跨 config 的最终推导，例如按 executor 能力决定 `async_scheduling`（`vllm.py:1437-1515`）、设 `distributed_executor_backend`、算 `max_concurrent_batches` 等。
+3. **`VllmConfig.__post_init__`**（`vllm.py:1330`）：做跨 config 的最终推导，例如按 executor 能力决定 `async_scheduling`（`vllm.py:1462-1540`）、设 `distributed_executor_backend`、算 `max_concurrent_batches` 等。
 4. **环境变量**：`vllm/envs.py` 集中定义（`VLLM_ENABLE_V1_MULTIPROCESSING`、`VLLM_ENGINE_READY_TIMEOUT_S`、`VLLM_V1_OUTPUT_PROC_CHUNK_SIZE`、`VLLM_LOG_STATS_INTERVAL` 等），`EngineArgs` 字段默认值多取自对应 config 的默认值，CLI 未显式给时回落到 env / config 默认。
 5. **JSON / dict**：`compilation_config`、`speculative_config`、`kv_transfer_config`、`attention_config` 等支持传 dict，在 `LLM.__init__`（`entrypoints/llm.py:260` 的 `_make_config`）或 `create_engine_config` 里转成对应 config 实例。
 
@@ -237,8 +237,9 @@ OpenAIServingChat 流式/非流式打包 → SSE / JSON 响应
 
 - `LLM` 构造时 `disable_log_stats=True`（`llm.py:228`），并禁止单进程 `data_parallel_size>1`（`llm.py:283`，会挂起）。
 - `AsyncLLM` 支持 streaming input（`AsyncGenerator[StreamingInput]`，`async_llm.py:458`）、`data_parallel_rank` 路由、reasoning parser 等在线特性。
-- 两者都通过 `InputProcessor`（`v1/engine/input_processor.py:39`）把 prompt 转 `EngineCoreRequest`，通过 `OutputProcessor`（`v1/engine/output_processor.py:464`）把 `EngineCoreOutput` 转 `RequestOutput`。区别只在 `OutputProcessor` 是否带 per-request 队列（`RequestOutputCollector`）。`InputProcessor` 还在构造时加载自定义 logits processor 类并缓存 per-request 参数校验器（`_build_logits_processors_params_validator`，#56497），准入时按 V1/V2 runner 分别走 `validate_logits_processors_parameters` 或 `build_custom_logits_processors_params_validator`。
+- 两者都通过 `InputProcessor`（`v1/engine/input_processor.py:41`）把 prompt 转 `EngineCoreRequest`，通过 `OutputProcessor`（`v1/engine/output_processor.py:464`）把 `EngineCoreOutput` 转 `RequestOutput`。区别只在 `OutputProcessor` 是否带 per-request 队列（`RequestOutputCollector`）。`InputProcessor` 还在构造时加载自定义 logits processor 类并缓存 per-request 参数校验器（`_build_logits_processors_params_validator`，#56497），准入时按 V1/V2 runner 分别走 `validate_logits_processors_parameters` 或 `build_custom_logits_processors_params_validator`。
 - **v0.30 增量**：`InputProcessor.process_inputs` 新增 `kv_hints`（`KvHintsEnvelope`，#53423）参数并透传到 `EngineCoreRequest`/`Request`（可编程 KV 管理提示，见 02 §3.3）；`max_tokens` 未设时按 `max_model_len - prompt_len` 填充后校验 `min_tokens <= max_tokens`（#57731）；prompt embeds 的 `is_token_ids` 长度须与 `prompt_embeds` 一致（#57006）。
+- **v0.30.1rc0 区间**：`InputProcessor` 构造时加载 `diffusion_config` 并在准入时做 `is_diffusion` 检查（#57250，DiffusionGemma 结构化生成）；`with_hf_config` 子模型视图跳过 `VllmConfig.__post_init__` 重新校验（#58212，`model_config.is_submodel_config=True` 时 early-return），避免 submodel view 的 config 被 target 配置覆盖。
 
 ## 7. 关键文件
 <!-- tags: files -->

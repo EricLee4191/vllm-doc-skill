@@ -1,6 +1,6 @@
 # 部署、API 服务与性能调优
 
-> 基于 vLLM main（`d90f0eade5`，2026-09-22），最新 tag **v0.30.0**（`9ed533eb4a`，2026-09-20，正式 release）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 部署形态总览
 <!-- tags: deployment, serve, docker, offline, api-server, 部署 -->
@@ -218,7 +218,7 @@ docker run --rm --gpus all \
 | `VLLM_USE_RUST_FRONTEND` | `0` | 用 Rust `vllm-frontend-rs` 替代 Python 前端（v0.28+，实验性，见 §1.2） |
 | `VLLM_USE_V2_MODEL_RUNNER` | 空（自动） | **v0.29**，强制选 Model Runner V2/V1（默认自动：V2 为默认，见 03 §1） |
 | `--enable-scale-out`（CLI flag） | `False` | **v0.30**（#55176）：开启 scale-out render/derender/token-in 端点。取代了 v0.29 的 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（已移除）；`vllm launch render` 专用模式下默认开（`vllm/entrypoints/scale_out/factories.py:72`）。derender 流式语义（客户端携带 `stream_state` 的无状态协议）见 07 §1 与 `docs/serving/online_serving/derenderer.md`（#57922） |
-| `aux_output_config`（JSON，`VllmConfig` 字段） | 关闭 | **v0.30 新增**（#45635）：`enable_return_routed_experts`（MoE routed-expert 输出按 KV block hash 持久化到 mmap arena，供外部按 prefix-cache block 读取）+ `max_bytes`（arena 上限，缺省由 worker 按 `num_blocks * hashes_per_kv_block * block_nbytes` 推导）。要求 V2 runner + MoE + prefix caching，拒绝 PP>1/DCP/PCP>1/KV connector（`config/vllm.py:1091`），见 05 §9.4 |
+| `aux_output_config`（JSON，`VllmConfig` 字段） | 关闭 | **v0.30 新增**（#45635）：`enable_return_routed_experts`（MoE routed-expert 输出按 KV block hash 持久化到 mmap arena，供外部按 prefix-cache block 读取）+ `max_bytes`（arena 上限，缺省由 worker 按 `num_blocks * hashes_per_kv_block * block_nbytes` 推导）。要求 V2 runner + MoE + prefix caching，拒绝 PP>1/DCP/PCP>1/5 个已知 PD KV connector（Nixl/NixlPull/NixlPush/MoRIIO/Mooncake，#58150）（`config/vllm.py:1092`），见 05 §9.4 |
 | `VLLM_XPU_USE_SAMPLER_KERNEL` | `1` | **v0.30 新增**（#57277）：XPU fused top-k/top-p sampler kernel（不排序 vocab、不物化概率张量；per-request seed/greedy 请求自动回退），见 06 §XPU |
 | `engram_config.dp_shared_memory` | 自动（同机 co-located DP 默认共享） | **v0.30 新增**（#57651）：Engram n-gram 嵌入表 host 内存在同机 DP replica 间共享，见 07 §7.2 |
 | `VLLM_ENABLE_GEMM_RS` | `0` | **v0.30**（#57428）：SM100 GEMM + reduce-scatter 融合（原 `VLLM_KIMI_K3_GEMM_RS` 更名），Kimi-K3 与 DSV4.1 `wo_b` 的 sequence-parallel 投影，见 06 |
@@ -300,7 +300,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.5 编译与 CUDA Graph
 <!-- tags: compile, cudagraph, 编译, optimization-level, enforce-eager -->
 
-- `--enforce-eager`：完全禁用 torch.compile 和 cudagraph。启动最快、显存最省，但 decode 性能明显下降。**只在调试/测启动时间/显存紧张时用**。
+- `--enforce-eager`：完全禁用 torch.compile 和 cudagraph。启动最快、显存最省，但 decode 性能明显下降。**只在调试/测启动时间/显存紧张时用**。**v0.30.1rc0 区间**：`enforce_eager` 现在还会把 `kernel_config.enable_jit_warmup` 置 False（#58197，`config/vllm.py:1619-1628`），eager 模式不再做 JIT warmup（#55146 门控），进一步缩短启动时间。
 - 默认（`-O2`）：`CompilationMode.VLLM_COMPILE`（Inductor 后端 + piecewise 编译 + 自定义 pass）+ `CUDAGraphMode.FULL_AND_PIECEWISE`（`vllm/config/compilation.py:53`）。cudagraph 消除 decode 的 kernel launch 开销，小 batch 收益最大。
 - `-O0`~`-O3`（`VllmConfig.optimization_level`，默认 O2，`vllm/config/vllm.py:439`）：O0 无优化最快启动；O1 Dynamo+Inductor+PIECEWISE cudagraph；O2 加 FULL_AND_PIECEWISE；O3 目前等同 O2。
 - `--compilation-config`（或 `-cc.mode=3`、`-cc.cudagraph_capture_sizes=[1,2,4,8]`）：精细控制。`cudagraph_capture_sizes` 默认到 `max_num_seqs`；显存不够时截断（如 `[1,2,4,8,16]`）。
@@ -317,7 +317,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
   - 纯短 prompt 高并发场景 chunked prefill 几乎无感；
   - `--long-prefill-token-threshold`：超过该长度的 prompt 视为"长"（默认 0=不限制）；
   - 关闭 chunked prefill（`--no-enable-chunked-prefill`，部分模型不支持）时 `max_num_batched_tokens` 必须 ≥ `max_model_len`。
-- `--async-scheduling`（默认按 executor 能力自动开启）：调度与执行重叠，减少 GPU 空泡，改善延迟与吞吐。
+- `--async-scheduling`（默认按 executor 能力自动开启）：调度与执行重叠，减少 GPU 空泡，改善延迟与吞吐。**v0.30.1rc0 区间**：MRV1 + PP>1 + async scheduling + structured output 组合被禁止（#56250，`config/vllm.py:1462-1540` auto 分支），避免 PP 广播与 structured output 的交互死锁；`diffusion_config` + async scheduling 时自动选 `DiffusionAsyncScheduler`（#57250，见 07 §3）。
 - `--scheduling-policy priority`：按请求 `priority` 字段调度（默认 `fcfs`）。
 - `--watermark`（`SchedulerConfig.watermark`，默认 0）：准入时预留的 KV block 比例，防频繁抢占。
 
@@ -361,7 +361,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 
 `ProfilerConfig`（`vllm/config/profiler.py:38`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1764`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:21`）或离线 `LLM.start_profile()/stop_profile()`。
 
-- **架构（v0.30.0rc2 统一后）**：profiler 创建/分发收敛在 `vllm/profiler/wrapper.py` 的工厂 `create_worker_profiler`（:675），各 worker（`gpu_worker.py:1251` 等）在 `profile()` 时懒创建 wrapper；平台差异（CUDA/XPU/CPU activity 映射）由 wrapper 内部按 `current_platform` 处理，worker 侧不再各自实现（#57460，此前 `cpu_worker.py`/`xpu_worker.py` 各有一份重复代码）。
+- **架构（v0.30.0rc2 统一后）**：profiler 创建/分发收敛在 `vllm/profiler/wrapper.py` 的工厂 `create_worker_profiler`（:675），各 worker（`gpu_worker.py:1323` 等）在 `profile()` 时懒创建 wrapper；平台差异（CUDA/XPU/CPU activity 映射）由 wrapper 内部按 `current_platform` 处理，worker 侧不再各自实现（#57460，此前 `cpu_worker.py`/`xpu_worker.py` 各有一份重复代码）。
 - **`torch_profiler_activities`**（`config/profiler.py:55`）：worker 侧 torch profiler 记录的 activity 列表（`CPU`/`CUDA`/`PrivateUse1`/`XPU`）；缺省时按平台默认（GPU=CPU+CUDA，XPU=CPU+XPU，CPU=CPU）。`delay_iterations`/`max_iterations` + `ignore_frontend=False` 且记录 CPU 时会告警高开销（`config/profiler.py:180` 校验）。
 - **`WorkerProfiler.should_annotate`**（`wrapper.py:60`）：worker 迭代是否注入 profiler annotation（`record_function`）的开关，前端/worker 可分别控制。
 - **Proton**（Triton 官方 profiler）：`proton_profiler_dir` + `proton_context`（shadow/python）+ `proton_data`（tree/trace），worker 各写 rank 独立文件；适合 kernel 级分析。
