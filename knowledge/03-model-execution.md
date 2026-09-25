@@ -1,6 +1,6 @@
 # 模型执行与编译优化
 
-> 版本：基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 版本：基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的"模型执行层"由三层组成：
@@ -275,7 +275,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ### 6.2 warmup / capture 顺序（`compile_or_warm_up_model`）
 <!-- tags: warmup, capture, 顺序, kernel-warmup, compile -->
 
-0. 开头先把 `pp_handler.set_disabled(True)`（#56956）：warmup 阶段跑的是合成步，PP sampled-token 广播无有效载荷，其 side-stream NCCL op 可能与下一步激活 p2p 重叠导致死锁，整个 warmup 窗口禁用、serve 前恢复（末尾 `set_disabled(False)`）。
+0. ~~开头先把 `pp_handler.set_disabled(True)`（#56956）~~（**已回退**：#56956 在 2026-09-25 窗口被 `09fe178dba` #58484 整体 revert，`set_disabled`/`_alloc_combined`/`warmup_pp_decode_update` 均不存在，warmup 顺序从第 1 步开始）。
 1. `VLLM_COMPILE` 模式下，对 `compile_sizes` 中不在 capture sizes 里的 size（如 `max_num_batched_tokens`）逐个 `_dummy_run` 编译。
 2. `kernel_warmup(worker)`（`model_executor/warmup/kernel_warmup.py:157`）：预热/autotune 推理期 kernel（Triton JIT、flashinfer 等），避免首请求 JIT 卡顿。
 3. V2 runner 的 `warmup_kernels(...)`（`gpu/warmup.py`）现在受 `kernel_config.enable_jit_warmup` 门控（#55146）——`enforce_eager` 时 `VllmConfig.__post_init__` 会把它置 False（#58197），eager 模式不再做 JIT warmup。

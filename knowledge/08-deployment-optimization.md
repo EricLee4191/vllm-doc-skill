@@ -1,6 +1,6 @@
 # 部署、API 服务与性能调优
 
-> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 部署形态总览
 <!-- tags: deployment, serve, docker, offline, api-server, 部署 -->
@@ -38,7 +38,7 @@ out = llm.generate(["Hello"], SamplingParams(temperature=0.7, max_tokens=128))
 
 离线与在线共享同一套 `VllmConfig`（`vllm/config/vllm.py:355`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `kv_transfer_config` / `speculative_config` / `observability_config` 等。
 
-**Initialized engine snapshots（v0.30 新增，#51360，实验性）**：`vllm snapshot create/restore` CLI（`vllm/entrypoints/cli/snapshot.py` + `vllm/snapshot/` 包：`runtime.py`/`server.py`/`manifest.py`/`controller.py`）用 **CRIU + CUDA checkpoint** 捕获**已初始化引擎**的整个进程树（含 CUDA 状态），restore 时校验环境指纹（manifest 记录打开的 generated-cache 文件等）并复现记录的 token 输出后才对外服务——把"激活"成本从完整启动降到快照恢复。约束：Linux x86-64 + 单 NVIDIA GPU、**TP1**、单个无鉴权明文 HTTP server（不支持 TLS/middleware/UDS/投机解码）、需 CRIU + CUDA plugin + root、`io_uring` 禁用、模型须为远程 model ID + 40 字符 `--revision`（create 时 `HF_HUB_OFFLINE=1`）。面向**同机反复激活同一模型+配置**的场景，不是可移植模型工件（详见 `docs/features/initialized_snapshots.md`）。
+**Initialized engine snapshots（v0.30 新增，#51360，实验性）**：`vllm snapshot create/restore` CLI（`vllm/entrypoints/cli/snapshot.py` + `vllm/snapshot/` 包：`runtime.py`/`server.py`/`manifest.py`/`controller.py`）用 **CRIU + CUDA checkpoint** 捕获**已初始化引擎**的整个进程树（含 CUDA 状态），restore 时校验环境指纹（manifest 记录打开的 generated-cache 文件等）并复现记录的 token 输出后才对外服务——把"激活"成本从完整启动降到快照恢复。约束：Linux x86-64 + 单 NVIDIA GPU、**TP1**、单个无鉴权明文 HTTP server（不支持 TLS/middleware/UDS/投机解码）、需 CRIU + CUDA plugin + root、`io_uring` 禁用、模型须为远程 model ID + 40 字符 `--revision`（create 时 `HF_HUB_OFFLINE=1`）。面向**同机反复激活同一模型+配置**的场景，不是可移植模型工件（详见 `docs/features/initialized_snapshots.md`）。2026-09-25 窗口新增 `vllm preload` CLI（#56680）：把模型加载/编译前置为独立步骤，`serve` 启动时直接复用预加载产物，进一步压缩冷启动（与 snapshot 的 CRIU 路线互补：preload 走常规加载路径的产物缓存，不依赖 CRIU/root）。
 
 ### 1.2 在线 API server（`vllm serve`）
 <!-- tags: serve, api-server, 在线, 进程模型, rust-frontend -->

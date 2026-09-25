@@ -1,6 +1,6 @@
 # 调度器与 KV Cache 管理
 
-> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 总体架构
 <!-- tags: scheduler, overview, 调度器 -->

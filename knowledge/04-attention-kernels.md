@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 

@@ -1,6 +1,6 @@
 # 投机解码与高级推理特性
 
-> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 本文覆盖 vLLM 的高级特性：**投机解码 (speculative decoding)**、**采样 (sampling)**、**结构化输出 (structured output)**、**LoRA 多适配器**、**多模态 (multimodal)**、**reasoning/思考模型支持**，以及 v0.29 新增的**文本水印 (watermarking)** 与 **Engram/PLE（n-gram 嵌入存储）**。重点讲架构与部署/调优旋钮。
 
@@ -193,11 +193,11 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 - **backend 选择**：`StructuredOutputsConfig.backend`（`config/structured_outputs.py:21`）默认 `"auto"`。`auto` 模式在 `sampling_params.py:1201-1246`（`_validate_structured_outputs` 的 auto 分支）里按优先级尝试：先 `xgrammar`，失败则 `guidance`（Mistral 非 tekken tokenizer 或 schema 含 guidance 不支持特性时退到 `outlines`）。
 - **backend 实现**：
-  - `XgrammarBackend`（`backend_xgrammar.py:37`）：默认。`xgr.GrammarCompiler` + `GrammarMatcher`，`compile_grammar` 支持 `JSON`/`JSON_OBJECT`/`GRAMMAR`/`REGEX`/`STRUCTURAL_TAG`。
+  - `XgrammarBackend`（`backend_xgrammar.py:36`）：默认。`xgr.GrammarCompiler` + `GrammarMatcher`，`compile_grammar`（`:78`）支持 `JSON`/`JSON_OBJECT`/`GRAMMAR`/`REGEX`/`STRUCTURAL_TAG`；2026-09-25 窗口起 **Lark grammar 原生解析**（`1f0bc49ee6` #58321，不再经 EBNF 转换）。
   - `GuidanceBackend`（`backend_guidance.py`）、`OutlinesBackend`（`backend_outlines.py`，SQLite 磁盘缓存 `OUTLINES_CACHE_DIR`）、`LMFormatEnforcerBackend`（`backend_lm_format_enforcer.py`）。
 - **约束机制 = bitmask**：每个请求的 grammar 是一个 FSM。每步 `grammar_bitmask()`（`__init__.py:314`）为每个待采样位置（含每个投机位置 + bonus）填一个 token bitmask（`grammar.fill_bitmask`），大 batch 时用线程池并行填（`fill_bitmask_parallel_threshold=128`）。GPU 侧 `apply_grammar_bitmask`（`vllm/v1/structured_output/utils.py:101`）把 bitmask 重排到与 batch 对齐，再 `xgr.apply_token_bitmask_inplace` 把非法 token 的 logit 置 -inf。
-- **FSM 推进**：`XgrammarGrammar.accept_tokens`（`backend_xgrammar.py:157`）逐 token 推进并检测终止；`validate_tokens`（`backend_xgrammar.py:181`）预校验 draft token（不推进，用于投机解码过滤）；`rollback` 支持回滚（`max_rollback_tokens=num_speculative_tokens`）。
-- **v0.30 增量**：xgrammar JSON Schema feature gating 修复（#48416，`backend_xgrammar.py`）：`_schema_types()`（`:247`）把 **list-valued `"type"`**（如 `"type": ["string", "null"]`）归一化成 `set[str]`，`has_xgrammar_unsupported_json_features`（`:257`）据此判断——此前 list 型 type 被误判/漏判导致 schema 支持性检查出错（issue #57550 的相关修复，FIXME 标注该方案待重设计）。
+- **FSM 推进**：`XgrammarGrammar.accept_tokens`（`backend_xgrammar.py:159`）逐 token 推进并检测终止；`validate_tokens`（`backend_xgrammar.py:183`）预校验 draft token（不推进，用于投机解码过滤）；`rollback` 支持回滚（`max_rollback_tokens=num_speculative_tokens`）。
+- **v0.30 增量**：xgrammar JSON Schema feature gating 修复（#48416，`backend_xgrammar.py`）：`_schema_types()`（`:249`）把 **list-valued `"type"`**（如 `"type": ["string", "null"]`）归一化成 `set[str]`，`has_xgrammar_unsupported_json_features`（`:259`）据此判断——此前 list 型 type 被误判/漏判导致 schema 支持性检查出错（issue #57550 的相关修复，FIXME 标注该方案待重设计）。
 
 ### 3.2 请求侧
 <!-- tags: structured-output, 请求, request, key, 异步编译 -->

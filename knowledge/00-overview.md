@@ -1,6 +1,6 @@
 # vLLM 知识库总览
 
-> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
+> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
 
 ## 1. vLLM 是什么
 <!-- tags: intro, overview, 简介 -->
@@ -204,6 +204,14 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
 ## 7. 增量更新记录
 <!-- tags: changelog, 增量更新, baseline, 基线 -->
 
+- **2026-09-25**：基线从 `9f07d023d0`（2026-09-23，v0.30.1rc0）推进到 `afea5c20c7`（2026-09-25，最新 tag 仍 **v0.30.1rc0**，`153242a314`）。区间 127 commits（721 文件，+20634/−5948）。主要变更：
+  - **前端/启动**：`vllm preload` CLI（#56680，模型加载/编译前置，serve 复用预加载产物，08 §1.1）；slow tokenizer mode 移除（#58545）；`/v1/messages` 支持 Disable Thinking（#58613）；`--enable-log-requests` 请求体 debug 日志（#58163）；streaming derender detokenization offload（#57528）。
+  - **投机解码/调度**：DSpark PP 支持**回退**（#56956 被 `09fe178dba` #58484 revert，03 §6.2/05 §2.2 已同步）；DFlash context K/V precompute 进 draft CUDA graph（#57632）；Mamba2 prefill SSM state save 批量化去 GPU↔CPU 同步（#49371）；`--long-prefill-token-threshold` 自适应调参（#58459）。
+  - **结构化输出**：xgrammar 原生解析 Lark grammar（#58321，07 §3）；outlines 接受 grammar finish 后的 EOS + 拒绝 json_object 校验（#57743）+ rejected drafts 后 EOS/mask 修复（#58612）。
+  - **分布式/平台**：**PCP+DP 组合支持**（#57075，05 §2.2）；SM100/103 low-SM multimem reduce-scatter（#55072）；XPU GRAPH 默认开（#51600）+ MRV2+PP microbatch flag（#55145）；CPU AVX10.2 按编译器支持门控（#58133）+ 预构建 triton（#58140）+ Zen CPU encoder attention 走 zentorch SDPA（#54508）；ROCm gfx950 MXFP8 GEMM native 32x32 block scales（#58510）+ skinny GEMM 去 69 次冗余 contiguous copy（#58566）+ DSv4.1 sparse decode MXFP8 + grouped FP8 GEMM（#58456）。
+  - **量化/内核**：Triton kernel dispatcher（#43048）；FlashInfer 升级 0.7.0（#58069）；fp8.py 在线量化支持移除改用 online shorthands（#53585）；Quark 静默在线量化移除（#51800）；DSv4 inverse RoPE+FP8 quant 融合进 FlashInfer sparse MLA（#58621）；DSv4.1 恢复 fused query RMSNorm+MXFP8（#57679）；Engram offloaded lookup 串行化 + huge pages（#56926）；启动期 Triton kernel warmup 并行化（#58582）；VLLM_BATCH_INVARIANT 下默认 breakable CUDA graphs（#57586）。
+  - **KV/多模态**：KV connector 无 forward 步 finalize saves（#57775）；增量多模态 block hashing 修复（#51694）；partial-block KV event 保留全部多模态 feature（#58288）；encoder-cache hit embedding 数不匹配拒绝（#57696）；prompt_embeds tensor 随 InputBatch slot 释放（#57988）；NIXL push 完成上报恢复（#58188）。
+  - **Rust 前端**：histogram 观测 lock-free（#58574）；`--sse-keep-alive-interval`（#58306）；HF 模板自定义 chat roles（#58311）；Nemotron-H vision 预处理上下文（#57634）。
 - **2026-09-24**：基线从 `d90f0eade5`（2026-09-22，v0.30.0）推进到 `9f07d023d0`（2026-09-23，最新 tag **v0.30.1rc0**，`153242a314`，2026-09-23 release candidate）。区间 69 commits。主要变更：
   - **投机解码**：DSpark 支持 PP（#56956，`pp_utils.py` 的 `PPHandler.set_disabled()` + `broadcast_drafts` 折叠进 `post_update`）；Kimi-K3 变长 decode（#52988，MLA/KDA metadata builder 支持 `max_query_len`，`FlashInferMLADecodeMetadata` 数据类化）；异构 vocab spec decode 去掉 CPU-GPU 同步（#57396）；GLM MTP head 延迟加载（#55442，`defer_lm_head`）；MRV1+PP>1+async sched+structured output 组合禁止（#56250）。详见 02/04/05/07/08。
   - **结构化生成/解析**：DiffusionGemma 结构化生成（#57250，`DiffusionAsyncScheduler` + `validate_diffusion_sampling_params`）；Granite 流式 tool-call 解析（#49648，`parser/granite.py` 新文件）；length finish_reason 流式 tool call 修复（#46303）；FIM completion 渲染（#44229，`DeepseekV4Renderer.render_completion_suffix`）。详见 01/07/08。

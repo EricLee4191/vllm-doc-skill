@@ -1,6 +1,6 @@
 # 分布式并行（TP/PP/DP/EP）与 KV 传输
 
-> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 > 核心目录：`vllm/distributed/`、`vllm/config/parallel.py`、`vllm/v1/executor/`、`vllm/v1/worker/`。
 
 ---
@@ -60,7 +60,7 @@ world_size_across_dp = world_size * data_parallel_size
 - 把模型按层切成若干 stage，每个 stage 占一部分 GPU；stage 间用 P2P `send`/`recv` 传 hidden states。
 - 适用：模型太大单机放不下，跨节点扩展。
 - `MultiprocExecutor.supports_pp = True`；`RayDistributedExecutor` 也支持。PP 组内相邻 rank 走 `send_tensor_dict`/`recv_tensor_dict`（`parallel_state.py` 中 `GroupCoordinator`）。
-- **v0.30.1rc0 区间**：DSpark 支持 PP（#56956）——`vllm/v1/worker/gpu/pp_utils.py` 的 `PPHandler` 新增 `set_disabled()`（warmup 窗口禁用 sampled-token 广播，见 03 §6.2）；`broadcast_drafts` 折叠进 `post_update`，`_alloc_combined()` 分配 (2,N) int32 buffer（pad 到 4 的倍数）；`gpu/model_runner.py` 新增 `warmup_pp_decode_update()`，`gpu/input_batch.py` 的 `broadcast_drafts` kernel 参数化。
+- **DSpark PP 支持已回退**：#56956（v0.30.1rc0 区间引入的 `PPHandler.set_disabled()`/`_alloc_combined()`/`warmup_pp_decode_update()`）在 2026-09-25 窗口被 `09fe178dba`（#58484）整体 revert，当前 `pp_utils.py` 的 `PPHandler`（:50）无 warmup 禁用机制；XPU 侧另有 microbatch 控制 flag（#55145，`VLLM_XPU_PP_MICROBATCH`，PPHandler ring depth 降为 1）。
 
 ### 2.3 Data Parallelism (DP)
 <!-- tags: dp, data-parallel, 数据并行, lb, padding -->
@@ -92,7 +92,7 @@ world_size_across_dp = world_size * data_parallel_size
 
 ### 2.5 PCP / DCP（Context Parallel）
 <!-- tags: pcp, dcp, context-parallel, 上下文并行, kv-split -->
-- **PCP**（`prefill_context_parallel_size`）：切分 prefill 序列计算，扩展 world size 但不增加 KV 分片数。当前不支持与 DP 组合（v0.29.0 中该约束已移至 `vllm/platforms/cuda.py:336`，"PCP does not support data parallelism on CUDA yet"）。
+- **PCP**（`prefill_context_parallel_size`）：切分 prefill 序列计算，扩展 world size 但不增加 KV 分片数。2026-09-25 窗口起**支持 PCP+DP 组合**（`e6dc16cebd` #57075，原 CUDA 平台约束已移除，`tests/test_pcp_dp.py` 覆盖）。
 - **DCP**（`decode_context_parallel_size`）：切分 decode KV cache，不扩展 world size；无 PCP 时复用 TP rank。`dcp_comm_backend` 可选 `ag_rs`（默认）或 `a2a`（MLA 模型把每层 3 次 NCCL 降到 2 次）。
 - **v0.30**：PCP+DCP 组合在 **sparse-MLA** 模型上启用（#56157）；PCP 支持 **decode-only FULL CUDA graph**（#53867，decode 步走 FULL 图，prefill 仍 eager/piecewise）。
 

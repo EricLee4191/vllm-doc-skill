@@ -1,6 +1,6 @@
 # 量化与多硬件平台
 
-> 基于 vLLM main（`9f07d023d0`，2026-09-23），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的量化体系分两条主线：
@@ -66,7 +66,7 @@ vLLM 的量化体系分两条主线：
 
 **ModelOpt（`modelopt.py`，NVIDIA TensorRT-Model-Optimizer 产物）**
 - `ModelOptFp8Config`（min capability 80）：FP8 W8A8，支持 per-tensor / per-channel-per-tensor（`ModelOptFp8PcPtLinearMethod`）/ per-block weight-only（`ModelOptFp8PbWoLinearMethod`）三种 linear method；可带 KV cache 量化（`kv_cache_quant_method`）。
-- `ModelOptNvFp4Config`（`modelopt_fp4`，min capability 75）：NVFP4（fp4_e2m1 + fp8 block scale，group_size=16），Blackwell 最优显存/吞吐组合；有 W4A16 变体 `ModelOptNvFp4W4A16LinearMethod`。**v0.30.1rc0 区间**：per-token NVFP4 MoE 后端（#57176）——`trtllm_nvfp4_moe.py` 现同时支持 `(kNvfp4Static, kNvfp4Dynamic)` 与 `(kNvfp4Static, kNvfp4DynamicToken)` 组合。
+- `ModelOptNvFp4Config`（`modelopt_fp4`，min capability 75）：NVFP4（fp4_e2m1 + fp8 block scale，group_size=16），Blackwell 最优显存/吞吐组合；有 W4A16 变体 `ModelOptNvFp4W4A16LinearMethod`。**v0.30.1rc0 区间**：per-token NVFP4 MoE 后端（#57176）——`trtllm_nvfp4_moe.py` 现同时支持 `(kNvfp4Static, kNvfp4Dynamic)` 与 `(kNvfp4Static, kNvfp4DynamicToken)` 组合；TRTLLM-Gen 系 MoE（nvfp4/mxfp4/fp8）在 modular path 下 top-k finalize 延迟到 `MoEKernel` 内执行（#58635，`fused_moe/modular_kernel.py`/`moe_output.py`）。
 - `ModelOptMxFp8Config`（`modelopt_mxfp8`，min capability 80）：MXFP8（e8m0 scale，1x32 block），Marlin kernel 支持 SM80+。
 - `ModelOptMixedPrecisionConfig`（`modelopt_mixed`）：混合精度（不同层不同 bit）。
 - 识别方式：`override_quantization_method` 读 `hf_quant_config.json` 里的 `quant_algo`（FP8/NVFP4/MXFP8）。
