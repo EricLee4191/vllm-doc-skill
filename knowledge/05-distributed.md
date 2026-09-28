@@ -1,6 +1,6 @@
 # 分布式并行（TP/PP/DP/EP）与 KV 传输
 
-> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 > 核心目录：`vllm/distributed/`、`vllm/config/parallel.py`、`vllm/v1/executor/`、`vllm/v1/worker/`。
 
 ---
@@ -317,7 +317,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
   - `wait_for_save()`：forward 结束前确保保存完成。
   - `get_finished(finished_req_ids)`：返回异步传输完成的请求 id。
   - `register_kv_caches` / `register_cross_layers_kv_cache`（NIXL 预注册）、`get_handshake_metadata`（P/D 带外握手）、`build_connector_worker_meta`。
-- `SupportsHMA`（`vllm/distributed/kv_transfer/kv_connector/v1/base.py:98`）：支持 hybrid memory allocator 的连接器需实现 `request_finished_all_groups`；否则要 `--disable-hybrid-kv-cache-manager`。
+- `SupportsHMA`（`vllm/distributed/kv_transfer/kv_connector/v1/base.py:99`）：支持 hybrid memory allocator 的连接器需实现 `request_finished_all_groups`；否则要 `--disable-hybrid-kv-cache-manager`。
 
 ### 6.5 集成点
 <!-- tags: integration, 集成, model-runner-mixin, aggregator, 生命周期 -->

@@ -1,6 +1,6 @@
 # 投机解码与高级推理特性
 
-> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 本文覆盖 vLLM 的高级特性：**投机解码 (speculative decoding)**、**采样 (sampling)**、**结构化输出 (structured output)**、**LoRA 多适配器**、**多模态 (multimodal)**、**reasoning/思考模型支持**，以及 v0.29 新增的**文本水印 (watermarking)** 与 **Engram/PLE（n-gram 嵌入存储）**。重点讲架构与部署/调优旋钮。
 
@@ -96,7 +96,7 @@ class SpecDecodeMetadata:
 ### 1.4 如何配置
 <!-- tags: speculative-config, 配置, cli, 字段, 示例 -->
 
-`SpeculativeConfig`（`vllm/config/speculative.py:375`）主要字段：
+`SpeculativeConfig`（`vllm/config/speculative.py:388`）主要字段：
 
 - `num_speculative_tokens`：投机 token 数 K。若未给，默认取 draft 模型 config 的 `n_predict`。
 - `model`：draft 模型 / eagle head / MTP 权重路径；ngram 时传 `"ngram"`。
@@ -191,7 +191,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 `StructuredOutputManager`（`vllm/v1/structured_output/__init__.py:36`）是 engine 级单例，管理一个 backend（V1 不支持 per-request 切换 backend）。
 
-- **backend 选择**：`StructuredOutputsConfig.backend`（`config/structured_outputs.py:21`）默认 `"auto"`。`auto` 模式在 `sampling_params.py:1201-1246`（`_validate_structured_outputs` 的 auto 分支）里按优先级尝试：先 `xgrammar`，失败则 `guidance`（Mistral 非 tekken tokenizer 或 schema 含 guidance 不支持特性时退到 `outlines`）。
+- **backend 选择**：`StructuredOutputsConfig.backend`（`config/structured_outputs.py:21`）默认 `"auto"`。`auto` 模式在 `sampling_params.py:1215-1259`（`_validate_structured_outputs` 的 auto 分支）里按优先级尝试：先 `xgrammar`，失败则 `guidance`（Mistral 非 tekken tokenizer 或 schema 含 guidance 不支持特性时退到 `outlines`）。
 - **backend 实现**：
   - `XgrammarBackend`（`backend_xgrammar.py:36`）：默认。`xgr.GrammarCompiler` + `GrammarMatcher`，`compile_grammar`（`:78`）支持 `JSON`/`JSON_OBJECT`/`GRAMMAR`/`REGEX`/`STRUCTURAL_TAG`；2026-09-25 窗口起 **Lark grammar 原生解析**（`1f0bc49ee6` #58321，不再经 EBNF 转换）。
   - `GuidanceBackend`（`backend_guidance.py`）、`OutlinesBackend`（`backend_outlines.py`，SQLite 磁盘缓存 `OUTLINES_CACHE_DIR`）、`LMFormatEnforcerBackend`（`backend_lm_format_enforcer.py`）。
@@ -215,7 +215,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 - `--structured-outputs-config`（JSON，含 `backend`/`disable_any_whitespace`/`disable_additional_properties`/`reasoning_parser`/`reasoning_parser_plugin`/`enable_in_reasoning`）。
 - `--reasoning-parser`、`--reasoning-parser-plugin`（`arg_utils.py:1061` 附近）。
-- 环境变量 `VLLM_XGRAMMAR_CACHE_MB`（默认 512，`envs.py:1644`）控制 xgrammar 编译缓存；`OUTLINES_CACHE_DIR` 控制 outlines 磁盘缓存。
+- 环境变量 `VLLM_XGRAMMAR_CACHE_MB`（默认 512，`envs.py:1659`）控制 xgrammar 编译缓存；`OUTLINES_CACHE_DIR` 控制 outlines 磁盘缓存。
 - 请求级：`response_format`（OpenAI）/ `structured_outputs`（`json`/`regex`/`choice`/`grammar`/`json_object`/`structural_tag`）。
 
 ---

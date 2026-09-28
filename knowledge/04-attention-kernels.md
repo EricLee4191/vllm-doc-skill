@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 
@@ -240,7 +240,7 @@ Triton kernel 分布在三处：
 ### 7.3 相关环境变量（`vllm/envs.py`）
 <!-- tags: env-vars, 环境变量, kv-layout, flashinfer, rocm -->
 
-- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1801`）。
+- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1816`）。
 - `VLLM_BATCH_INVARIANT` — 批不变模式（影响 backend 选择，如 FlexAttention 默认 block 16；MLA/Mamba 需支持 batch invariance）。
 - `VLLM_USE_FLASHINFER_SAMPLER`（默认 True）— 采样用 FlashInfer。
 - `VLLM_USE_FLASHINFER_MOE_INT4` — FlashInfer INT4 MoE。

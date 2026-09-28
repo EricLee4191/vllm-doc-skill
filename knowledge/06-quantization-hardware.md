@@ -1,6 +1,6 @@
 # 量化与多硬件平台
 
-> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的量化体系分两条主线：
@@ -124,7 +124,7 @@ vLLM 的量化体系分两条主线：
 ### 1.4 量化如何接入模型
 <!-- tags: quantization, 接入, 识别, kernel-selection, 生命周期 -->
 
-1. **识别**：`ModelConfig._verify_quantization()`（`vllm/config/model.py:1257`）读 HF `config.json` 的 `quantization_config.quant_method`，按 `overrides` 优先级列表（:1271，`auto_gptq` > `gptq` > `gptq_marlin` > `auto_awq` > `awq` > `awq_marlin` > `inc` > `moe_wna16` > `modelopt*` > `mxfp8` > `mxfp4` > `gpt_oss_mxfp4` > `deepseek_v4_fp8` > `humming`）逐个调 `override_quantization_method()` 探测；用户 `--quantization` 与 checkpoint 不一致直接报错（:1334）。最后 `current_platform.verify_quantization()` 对照平台白名单（`interface.py:966`）。
+1. **识别**：`ModelConfig._verify_quantization()`（`vllm/config/model.py:1336`）读 HF `config.json` 的 `quantization_config.quant_method`，按 `overrides` 优先级列表（:1271，`auto_gptq` > `gptq` > `gptq_marlin` > `auto_awq` > `awq` > `awq_marlin` > `inc` > `moe_wna16` > `modelopt*` > `mxfp8` > `mxfp4` > `gpt_oss_mxfp4` > `deepseek_v4_fp8` > `humming`）逐个调 `override_quantization_method()` 探测；用户 `--quantization` 与 checkpoint 不一致直接报错（:1334）。最后 `current_platform.verify_quantization()` 对照平台白名单（`interface.py:966`）。
 2. **每层绑定**：`LinearBase.__init__`（`vllm/model_executor/layers/linear.py:259`）调 `quant_config.get_quant_method(self, prefix)` 得到 `LinearMethodBase`；`RoutedExperts`（MoE）同理得到 `FusedMoEMethodBase`；`Attention` 层得到 `BaseKVCacheMethod` 子类。
 3. **生命周期**：`create_weights()`（注册 `weight`/`weight_scale`/`input_scale` 等参数并**选 kernel**）→ 权重加载（`weight_loader` 从 checkpoint 灌入，`packed_modules_mapping` 处理 QKV/gate_up 融合）→ `process_weights_after_loading()`（转置/重打包/shuffle 成 kernel 期望的布局）→ `apply()`（forward 时调 kernel）。
 4. **kernel 选择**（`vllm/model_executor/kernels/linear/__init__.py`）：
@@ -240,7 +240,7 @@ vLLM 的量化体系分两条主线：
 - `--quantization / -q`：方法名（含 online shorthand）；`--quantization-config`：JSON 细粒度 spec（`{linear:{weight,activation}, moe:{...}, ignore:[...]}`）；`--allow-deprecated-quantization`。
 - `--kv-cache-dtype`：KV cache 精度（fp8 系 / turboquant 系 / per_token_head 系 / nvfp4）。
 - `--dtype`：权重/激活 dtype（`auto`/`half`/`bfloat16`/`float32`；AWQ 官方推荐 `half`）。
-- `--attention-backend`：强制 attention backend（`AttentionBackendEnum`）；`--linear-backend`、`--moe-backend`：强制 GEMM/MoE kernel 后端（选项清单见 `vllm/config/kernel.py:118-178`，`MoEBackend`/`LinearBackend` Literal + `KernelConfig` docstring）。
+- `--attention-backend`：强制 attention backend（`AttentionBackendEnum`）；`--linear-backend`、`--moe-backend`：强制 GEMM/MoE kernel 后端（选项清单见 `vllm/config/kernel.py:118-194`，`MoEBackend`/`LinearBackend` Literal + `KernelConfig` docstring）。
 - `--gpu-memory-utilization`（默认 0.92）、`--block-size`（KV block，默认 16，平台/backend 会自动调整）。
 
 **环境变量（`vllm/envs.py`，节选）**

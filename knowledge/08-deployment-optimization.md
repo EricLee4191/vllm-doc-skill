@@ -1,6 +1,6 @@
 # 部署、API 服务与性能调优
 
-> 基于 vLLM main（`afea5c20c7`，2026-09-25），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 147 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 部署形态总览
 <!-- tags: deployment, serve, docker, offline, api-server, 部署 -->
@@ -36,7 +36,7 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
 out = llm.generate(["Hello"], SamplingParams(temperature=0.7, max_tokens=128))
 ```
 
-离线与在线共享同一套 `VllmConfig`（`vllm/config/vllm.py:355`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `kv_transfer_config` / `speculative_config` / `observability_config` 等。
+离线与在线共享同一套 `VllmConfig`（`vllm/config/vllm.py:356`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `kv_transfer_config` / `speculative_config` / `observability_config` 等。
 
 **Initialized engine snapshots（v0.30 新增，#51360，实验性）**：`vllm snapshot create/restore` CLI（`vllm/entrypoints/cli/snapshot.py` + `vllm/snapshot/` 包：`runtime.py`/`server.py`/`manifest.py`/`controller.py`）用 **CRIU + CUDA checkpoint** 捕获**已初始化引擎**的整个进程树（含 CUDA 状态），restore 时校验环境指纹（manifest 记录打开的 generated-cache 文件等）并复现记录的 token 输出后才对外服务——把"激活"成本从完整启动降到快照恢复。约束：Linux x86-64 + 单 NVIDIA GPU、**TP1**、单个无鉴权明文 HTTP server（不支持 TLS/middleware/UDS/投机解码）、需 CRIU + CUDA plugin + root、`io_uring` 禁用、模型须为远程 model ID + 40 字符 `--revision`（create 时 `HF_HUB_OFFLINE=1`）。面向**同机反复激活同一模型+配置**的场景，不是可移植模型工件（详见 `docs/features/initialized_snapshots.md`）。2026-09-25 窗口新增 `vllm preload` CLI（#56680）：把模型加载/编译前置为独立步骤，`serve` 启动时直接复用预加载产物，进一步压缩冷启动（与 snapshot 的 CRIU 路线互补：preload 走常规加载路径的产物缓存，不依赖 CRIU/root）。
 
@@ -317,7 +317,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
   - 纯短 prompt 高并发场景 chunked prefill 几乎无感；
   - `--long-prefill-token-threshold`：超过该长度的 prompt 视为"长"（默认 0=不限制）；
   - 关闭 chunked prefill（`--no-enable-chunked-prefill`，部分模型不支持）时 `max_num_batched_tokens` 必须 ≥ `max_model_len`。
-- `--async-scheduling`（默认按 executor 能力自动开启）：调度与执行重叠，减少 GPU 空泡，改善延迟与吞吐。**v0.30.1rc0 区间**：MRV1 + PP>1 + async scheduling + structured output 组合被禁止（#56250，`config/vllm.py:1462-1540` auto 分支），避免 PP 广播与 structured output 的交互死锁；`diffusion_config` + async scheduling 时自动选 `DiffusionAsyncScheduler`（#57250，见 07 §3）。
+- `--async-scheduling`（默认按 executor 能力自动开启）：调度与执行重叠，减少 GPU 空泡，改善延迟与吞吐。**v0.30.1rc0 区间**：MRV1 + PP>1 + async scheduling + structured output 组合被禁止（#56250，`config/vllm.py:1537-1635` auto 分支），避免 PP 广播与 structured output 的交互死锁；`diffusion_config` + async scheduling 时自动选 `DiffusionAsyncScheduler`（#57250，见 07 §3）。
 - `--scheduling-policy priority`：按请求 `priority` 字段调度（默认 `fcfs`）。
 - `--watermark`（`SchedulerConfig.watermark`，默认 0）：准入时预留的 KV block 比例，防频繁抢占。
 
@@ -359,7 +359,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 ### 4.9 Profiling（torch / CUDA / Proton）
 <!-- tags: profiling, torch-profiler, proton, profile, 性能分析, 火焰图 -->
 
-`ProfilerConfig`（`vllm/config/profiler.py:38`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1764`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:21`）或离线 `LLM.start_profile()/stop_profile()`。
+`ProfilerConfig`（`vllm/config/profiler.py:40`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1764`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:21`）或离线 `LLM.start_profile()/stop_profile()`。
 
 - **架构（v0.30.0rc2 统一后）**：profiler 创建/分发收敛在 `vllm/profiler/wrapper.py` 的工厂 `create_worker_profiler`（:675），各 worker（`gpu_worker.py:1323` 等）在 `profile()` 时懒创建 wrapper；平台差异（CUDA/XPU/CPU activity 映射）由 wrapper 内部按 `current_platform` 处理，worker 侧不再各自实现（#57460，此前 `cpu_worker.py`/`xpu_worker.py` 各有一份重复代码）。
 - **`torch_profiler_activities`**（`config/profiler.py:55`）：worker 侧 torch profiler 记录的 activity 列表（`CPU`/`CUDA`/`PrivateUse1`/`XPU`）；缺省时按平台默认（GPU=CPU+CUDA，XPU=CPU+XPU，CPU=CPU）。`delay_iterations`/`max_iterations` + `ignore_frontend=False` 且记录 CPU 时会告警高开销（`config/profiler.py:180` 校验）。
@@ -382,7 +382,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 | 调度 | `--max-num-batched-tokens`、`--max-num-seqs`、`--max-num-scheduled-tokens`、`--long-prefill-token-threshold`、`--scheduling-policy`、`--async-scheduling`、`--watermark`、`--stream-interval` | 见 §4.1 |
 | 并行 | `--tensor-parallel-size`、`--pipeline-parallel-size`、`--data-parallel-size`、`--enable-expert-parallel`、`--all2all-backend`、`--distributed-executor-backend`、`--numa-bind` | 1/1/1 |
 | 编译 | `--optimization-level`、`--compilation-config`（`-cc.*`）、`--performance-mode` | O2 / balanced |
-| 投机解码 | `--speculative-config`（method/model/num_speculative_tokens，`vllm/config/speculative.py:375`） | 关 |
+| 投机解码 | `--speculative-config`（method/model/num_speculative_tokens，`vllm/config/speculative.py:388`） | 关 |
 | 结构化输出 | `--structured-outputs-config`（backend: xgrammar/guidance/outlines/lm-format-enforcer） | auto |
 | 可观测 | `--disable-log-stats`、`--otlp-traces-endpoint`、`--collect-detailed-traces`、`--kv-cache-metrics`、`--enable-mfu-metrics` | 关 |
 | 前端 | `--host`、`--port`、`--api-key`、`--api-server-count`、`--allowed-origins`、`--ssl-certfile`、`--root-path`、`--middleware` | 8000 |
