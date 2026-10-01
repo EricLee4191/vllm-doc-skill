@@ -1,6 +1,6 @@
 # 投机解码与高级推理特性
 
-> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 本文覆盖 vLLM 的高级特性：**投机解码 (speculative decoding)**、**采样 (sampling)**、**结构化输出 (structured output)**、**LoRA 多适配器**、**多模态 (multimodal)**、**reasoning/思考模型支持**，以及 v0.29 新增的**文本水印 (watermarking)** 与 **Engram/PLE（n-gram 嵌入存储）**。重点讲架构与部署/调优旋钮。
 
@@ -49,7 +49,7 @@ class SpecDecodeMetadata:
 | `suffix` | Suffix Decoding（依赖 `arctic_inference`，全局+prompt 后缀树） | 否 |
 | `medusa` | Medusa 多头，对 target hidden states 直接 argmax | 是（medusa head） |
 | `mlp_speculator` | MLP speculator | 是 |
-| `draft_model` | 独立小型 draft model（自回归） | 是 |
+| `draft_model` | 独立小型 draft model（自回归）。**v0.30.1rc0**：Model Runner V2 现支持 draft-model 投机解码（#43091，`gpu/spec_decode/` draft-model proposer），此前 V2 仅支持 head 式 draft | 是 |
 | `eagle` / `eagle3` | EAGLE / EAGLE3（用 target hidden states 做 drafter） | 是（eagle head） |
 | `mtp` | Multi-Token Prediction（DeepSeek/Qwen3-Next/GLM4 等自带 MTP 层） | 是（模型自带） |
 | `dflash` | DFlash 并行 draft（Qwen3 等，非因果注意力）。**v0.29**：draft 架构为 `DFlash2DraftModel` 时自动切到 DFlash2 speculator（`gpu/spec_decode/dflash2/speculator.py`，selector-walk kernel），无需单独 method。**v0.30**：启用 async scheduling（#58065） | 是 |
@@ -89,7 +89,7 @@ class SpecDecodeMetadata:
 - `synthetic`：按 `synthetic_acceptance_rates`（或 `synthetic_acceptance_length`）的衰减概率接受 draft，用于合成/测试。
 - `block`：块验证（Sun et al.），把 draft token 作为整体联合验证。
 
-**自适应验证（adaptive verification，v0.30 新增，#52228）**：`enable_adaptive_verification`（`speculative.py:539`，默认 False）开启后，MRV2 用 `OnlineAcceptanceEstimator`（`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py:313`，501 行）在线拟合每请求的接受率（log-odds 特征 + 线性模型，Triton kernel 做 accumulate/refit/predict，冷启动系数来自 DeepSeek-V4-Flash 等 5 个模型的离线拟合），据此动态调整每步实际验证的 draft 长度，把算力从低接受率请求上省下来。
+**自适应验证（adaptive verification，v0.30 新增，#52228）**：`enable_adaptive_verification`（`speculative.py:539`，默认 False）开启后，MRV2 用 `OnlineAcceptanceEstimator`（`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py:313`，501 行）在线拟合每请求的接受率（log-odds 特征 + 线性模型，Triton kernel 做 accumulate/refit/predict，冷启动系数来自 DeepSeek-V4-Flash 等 5 个模型的离线拟合），据此动态调整每步实际验证的 draft 长度，把算力从低接受率请求上省下来。**v0.30.1rc0 区间**：acceptance estimator 的 Triton kernel 避免重编译（#57107，`3d5f4d4cd5`）——refit/predict kernel 的 shape 特化收敛，消除运行期反复 JIT。
 
 **draft 采样**（`llm_base_proposer.py:441-513`，`_greedy_sample`/`_sample_from_logits`/`_sample_draft_tokens`）：`_greedy_sample` 支持 `use_local_argmax_reduction`（vocab-parallel 局部 argmax，把通信从 O(vocab) 降到 O(2*tp)）；`use_heterogeneous_vocab` 时用 `VocabMapping`（`vocab_mapping.py`，TLI 算法）在 draft/target 词表交集上约束 logits 并双向映射 token id。
 
@@ -109,11 +109,11 @@ class SpecDecodeMetadata:
 - `use_local_argmax_reduction` / `use_heterogeneous_vocab`：见上。
 - `suffix_decoding_max_tree_depth`(24) / `suffix_decoding_max_cached_requests`(10000) / `suffix_decoding_max_spec_factor`(1.0) / `suffix_decoding_min_token_prob`(0.1)。
 - `rejection_sample_method` / `synthetic_acceptance_rates` / `synthetic_acceptance_length` / `draft_sample_method` / `dspark_draft_topk` / `enable_adaptive_verification`(仅 dspark)。
-- `num_speculative_tokens_per_batch_size`：**动态投机解码**，`[(range_start, range_end, K), ...]`，按运行时 batch size 查表选 K（`vllm/v1/spec_decode/dynamic/utils.py`，scheduler 在 `__init__` 展开成 dense lookup `dynamic_sd_lookup`，`scheduler.py:287-294`，调度时查表 `scheduler.py:1444-1447`）。
+- `num_speculative_tokens_per_batch_size`：**动态投机解码**，`[(range_start, range_end, K), ...]`，按运行时 batch size 查表选 K（`vllm/v1/spec_decode/dynamic/utils.py`，scheduler 在 `__init__` 展开成 dense lookup `dynamic_sd_lookup`，`scheduler.py:287-294`，调度时查表 `scheduler.py:1446-1447`）。
 
 CLI（`vllm/engine/arg_utils.py`）：
 - `--speculative-config` / `-sc`（JSON dict，最灵活）
-- 快捷 flag：`--spec-method`、`--spec-model`、`--spec-tokens`（`arg_utils.py:1725` 附近）
+- 快捷 flag：`--spec-method`、`--spec-model`、`--spec-tokens`（`arg_utils.py:1710` 附近）
 
 示例：
 ```bash
@@ -130,7 +130,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 ### 1.5 调度器侧
 <!-- tags: scheduler, 调度, spec-tokens, draft-tokens, grammar -->
 
-- scheduler 每步把 draft token 放进 `SchedulerOutput.scheduled_spec_decode_tokens`（`scheduler.py:832`），`update_draft_token_ids`（`scheduler.py:2481`）在下一步前把新 draft 写回 `request.spec_token_ids`；结构化输出请求会用 `grammar.validate_tokens` 过滤非法 draft（`scheduler.py:2526`）。
+- scheduler 每步把 draft token 放进 `SchedulerOutput.scheduled_spec_decode_tokens`（`scheduler.py:832`），`update_draft_token_ids`（`scheduler.py:2482`）在下一步前把新 draft 写回 `request.spec_token_ids`；结构化输出请求会用 `grammar.validate_tokens` 过滤非法 draft（`scheduler.py:2528`）。
 
 ### 1.6 指标
 <!-- tags: metrics, 指标, acceptance-rate, 接受率, per-request -->
@@ -165,7 +165,7 @@ CLI（`vllm/engine/arg_utils.py`）：
    - 否则 `apply_temperature` → argmax-invariant 处理器（min_p）→ `TopKTopPSampler`（top_k/top_p + 加权随机采样）→ 按 temperature 是否 < 1e-5 决定取 greedy 还是 random。
 5. `gather_logprobs` 取 top-k + sampled token 的 logprob/rank。
 
-`TopKTopPSampler`（`vllm/v1/sample/ops/topk_topp_sampler.py:192`）按平台选实现：CUDA 优先 FlashInfer（`forward_cuda`），否则 native；CPU/XPU 各有 kernel。**v0.30 新增 XPU fused sampler kernel**（#57277）：`xpu_sampler_supported()`（`:129`）+ `xpu_sample()`（`:151`），`VLLM_XPU_USE_SAMPLER_KERNEL=1`（默认开）时 XPU 走 fused kernel（不排序 vocab、不物化概率张量，恒随机采样；per-request seed/greedy 请求不可用），MRV2 sampler 同步接入（见 06 §XPU）。
+`TopKTopPSampler`（`vllm/v1/sample/ops/topk_topp_sampler.py:202`）按平台选实现：CUDA 优先 FlashInfer（`forward_cuda`），否则 native；CPU/XPU 各有 kernel。**v0.30 新增 XPU fused sampler kernel**（#57277）：`xpu_sampler_supported()`（`:129`）+ `xpu_sample()`（`:151`），`VLLM_XPU_USE_SAMPLER_KERNEL=1`（默认开）时 XPU 走 fused kernel（不排序 vocab、不物化概率张量，恒随机采样；per-request seed/greedy 请求不可用），MRV2 sampler 同步接入（见 06 §XPU）。**v0.30.1rc0 区间**：CPU 向量化 Sampler kernel（#53913，`583637f126`）；Triton sampler warmup 的冗余特化削减（#58605，`1ee7f78e80`）。
 
 **Logits processors**（`vllm/v1/sample/logits_processor/`）：`MinPLogitsProcessor`、`LogitBiasLogitsProcessor`、`MinTokensLogitsProcessor`（`builtin.py`），通过 `is_argmax_invariant()` 区分是否影响 greedy。`SamplingMetadata`（`vllm/v1/sample/metadata.py`）携带每 batch 的 temperature/top_p/top_k/penalties/generators/`spec_token_ids`/`thinking_budget_state_holder`。
 
@@ -214,8 +214,8 @@ CLI（`vllm/engine/arg_utils.py`）：
 <!-- tags: structured-output, 配置, 旋钮, xgrammar-cache, reasoning -->
 
 - `--structured-outputs-config`（JSON，含 `backend`/`disable_any_whitespace`/`disable_additional_properties`/`reasoning_parser`/`reasoning_parser_plugin`/`enable_in_reasoning`）。
-- `--reasoning-parser`、`--reasoning-parser-plugin`（`arg_utils.py:1061` 附近）。
-- 环境变量 `VLLM_XGRAMMAR_CACHE_MB`（默认 512，`envs.py:1659`）控制 xgrammar 编译缓存；`OUTLINES_CACHE_DIR` 控制 outlines 磁盘缓存。
+- `--reasoning-parser`、`--reasoning-parser-plugin`（`arg_utils.py:1064` 附近）。
+- 环境变量 `VLLM_XGRAMMAR_CACHE_MB`（默认 512，`envs.py:1665`）控制 xgrammar 编译缓存；`OUTLINES_CACHE_DIR` 控制 outlines 磁盘缓存。
 - 请求级：`response_format`（OpenAI）/ `structured_outputs`（`json`/`regex`/`choice`/`grammar`/`json_object`/`structural_tag`）。
 
 ---
@@ -235,7 +235,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 ### 4.2 配置/调优旋钮
 <!-- tags: lora, 配置, 旋钮, max-loras, max-rank -->
 
-`LoRAConfig`（`vllm/config/lora.py:32`）/ CLI（`arg_utils.py:1514` 附近）：
+`LoRAConfig`（`vllm/config/lora.py:32`）/ CLI（`arg_utils.py:1517` 附近）：
 - `--enable-lora`：总开关。
 - `--max-loras`（默认 1）：单 batch 最多同时激活的 LoRA 数。
 - `--max-lora-rank`（默认 16）：最大 rank（支持 1/8/16/32/64/128/256）。
@@ -243,7 +243,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 - `--lora-dtype`（默认 auto）。
 - `--fully-sharded-loras`：TP 下全分片 LoRA 计算（长序列/高 rank 更快）。
 - `--lora-target-modules`：限制 LoRA 作用模块（如 `["o_proj","qkv_proj"]`）。
-- `--enable-tower-connector-lora`、`--specialize-active-lora`（按激活 LoRA 数捕获多份 cuda graph）、`--enable-mixed-moe-lora-format`、`--enable-moe-shared-loras`（MoE 专用）。
+- `--enable-tower-connector-lora`、`--specialize-active-lora`（按激活 LoRA 数捕获多份 cuda graph）、`--enable-mixed-moe-lora-format`、`--enable-moe-shared-loras`（MoE 专用）。**v0.30.1rc0 区间**：sequence classification 支持可变 `num_labels`（#57766，`953f90d25f`）；adapter 名与 served model 名冲突时拒绝（#59286）。
 
 部署要点：`max_loras` 决定 batch 内可并发服务的适配器数；`max_cpu_loras` 决定可缓存的适配器池大小（LRU 淘汰）。
 
@@ -267,12 +267,13 @@ CLI（`vllm/engine/arg_utils.py`）：
 - **v0.30 增量（多模态 bugfix/安全）**：
   - **Receiver cache 安全语义**（#57833，`multimodal/cache.py`，`MultiModalReceiverCache.update_receiver_cache_item` ~`:710-734`）：P0（API server 侧）miss 时可能以**同一 mm_hash 重发不同 payload**（独立 LRU 驱逐会让 P1/EngineCore 侧残留旧 tensor）。此前会把旧 tensor 顶替新 payload，导致 placeholder 与错误 item 配对、EngineCore 崩溃。现在**优先采用新 payload** 并保留供后续命中（`get_and_update_item`/`get_and_update_features` 语义更新）。
   - **模型预处理容错**：Molmo2 容忍畸形 EXIF（#57234，`models/molmo2.py`）；Whisper 30s 音频上限处理（`models/whisper.py`）；Mistral3 图像 grid 修复（`models/mistral3.py`）；DiffusionGemma 多模态修复（`models/diffusion_gemma.py`）。
+- **v0.30.1rc0 区间（多模态）**：flat/scoped `mm_processor_kwargs` 合并与解析修复（#56372，`295a0b8d64`）；device-side mm normalization 扩到 GLM4V/GLM5Next（#55389，`0a30bc3f9a`）与 Llama Nemotron VL Embed/Rerank（#57928，`70dc122f81`）；encoder 编译启用时保持 fused device input normalization（#59195，`5a4351ab09`）；encoder cudagraph + fused input norm 避免额外 d2d（#56711，`522101f6ed`）；compiled ViT attention 输出布局修复（#58182，`cd947f5c62`）；Mistral3 图像预处理优化（#57531，`d86cf91240`）；MiMo 声明 `embedding_fields` 使 EPD 对可服务图像（#58938，`8aaeef343a`）。
 - **多模态 + 投机解码**：`SpecDecodeBaseProposer` 支持 mm 输入（`supports_mm_inputs`），text-only draft 模型会告警并退回纯文本 draft（`llm_base_proposer.py:1346-1353`）。
 
 ### 5.2 配置/调优旋钮
 <!-- tags: multimodal, 配置, 旋钮, limit-mm, embeds -->
 
-`MultiModalConfig`（`vllm/config/multimodal.py:121`）/ CLI：
+`MultiModalConfig`（`vllm/config/multimodal.py:301`）/ CLI：
 - `--limit-mm-per-prompt`：每 prompt 各模态 item 上限，支持 `{"image": 16, "video": {"count":1,"num_frames":32,"width":512,"height":512}}`。
 - `--enable-mm-embeds`：允许直接传预计算 embedding（`*_embeds`），可省 encoder 显存。
 - `--mm-processor-cache-gb`（默认 4）/ `--mm-processor-cache-type`：processor 缓存（每 API/engine 进程各一份）。
@@ -298,9 +299,10 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 - `--reasoning-parser`：选 parser 名（如 `deepseek_r1`、`qwen3`）。
 - `--reasoning-parser-plugin`：动态加载自定义 parser 插件。
-- `--reasoning-config`（`arg_utils.py:1753`）：`reasoning_start_str`/`reasoning_end_str`（强制结束思考的字符串）。
+- `--reasoning-config`（`arg_utils.py:1759`）：`reasoning_start_str`/`reasoning_end_str`（强制结束思考的字符串）。
 - `--structured-outputs-config` 里的 `enable_in_reasoning`：思考阶段是否也施加结构化约束。
 - 请求级 `thinking_token_budget`：限制思考 token 数。
+- **v0.30.1rc0 区间**：Responses API 的 reasoning token 按 tool round 计数（#58927，`3184226984`）；Harmony "Unexpected token while expecting start token 200006" 抑制（#59254，`1d331f8341`）；Python Harmony 依赖切换到 oss-harmony（#55128，`73859fec58`）。
 
 ---
 
@@ -314,10 +316,10 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 - **Watermarker**（`watermarker.py`）：采样时对每个 token 的 logits 按 PRF 生成的 per-context 偏置做 Gumbel-max 扰动，使"绿名单"token 更易被选中。`GumbelWatermarker`（`gumbel.py`）+ `PhiloxPRF`（`prfs/philox.py`，64-bit key，`context_width` 个前序 token 作 context）。
 - **WatermarkDetector**（`detector.py`）：对已生成 token 序列做统计检测，产出 `WatermarkDetection`（`score`/`p_value`/`is_watermarked`），供下游验证文本是否带水印。
-- **配置**：`WatermarkConfig`（`vllm/config/watermarking.py:28`，`key`/`algorithm`/`alpha=0.1`/`context_width=4`/`deduplicate_contexts="single_turn"`/`prf="philox"`/`allow_target_only_watermarking=False`），CLI `--watermark-config`（`arg_utils.py:1731`，`create_watermark_config` :2041）。`VllmConfig.watermark_config`（`config/vllm.py:392`）。
+- **配置**：`WatermarkConfig`（`vllm/config/watermarking.py:28`，`key`/`algorithm`/`alpha=0.1`/`context_width=4`/`deduplicate_contexts="single_turn"`/`prf="philox"`/`allow_target_only_watermarking=False`），CLI `--watermark-config`（`arg_utils.py:1738`，`create_watermark_config` :2041）。`VllmConfig.watermark_config`（`config/vllm.py:392`）。
 - **两种算法**（`WatermarkingAlgorithm`，`config/watermarking.py:15`）：
   - `gumbel`（默认）：单密钥 Gumbel-max，**不支持投机解码**（`supports_speculative_decoding` 属性为 `False`）。
-  - `dual_key_gumbel`（v0.30 新增）：**双密钥** Gumbel-max，target 与 draft 各用一个密钥角色，`supports_speculative_decoding=True`；`alpha` 控制选 key B 的概率，检测用加权 early fusion（`gumbel.py:208`）。
+  - `dual_key_gumbel`（v0.30 新增）：**双密钥** Gumbel-max，target 与 draft 各用一个密钥角色，`supports_speculative_decoding=True`；`alpha` 控制选 key B 的概率，检测用加权 early fusion（`gumbel.py:212`）。
 - **投机解码支持（v0.30 新增，#56122）**：`spec_decode.py` 提供 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker`，把 target/draft 拆成两个 watermarker 角色；`allow_target_only_watermarking=True` 时允许 draft token 不打水印。`_check_watermarking_unsupported`（`config/vllm.py:1219`）现在**允许**投机解码，但要求：`draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {`dspark`,`eagle`,`eagle3`,`mtp`}（自回归模型类），且非 `dspark` 时不允许 parallel drafting；否则（`gumbel` 算法且未开 `allow_target_only_watermarking`）仍报错。也不支持 beam search。**强制 Model Runner V2**。
 - 采样侧实现在 `vllm/v1/worker/gpu/sample/watermark.py`（V2 runner 的 sample 子模块）；`vllm/v1/watermarking/gpu_sampler.py` 提供 GPU 采样器封装。
 
@@ -328,7 +330,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 - `cpu_offload`（默认 `True`；**v0.30**：legacy `VLLM_PLE_CPU_OFFLOAD` 环境变量已移除，固定默认开启）：嵌入表是否 offload 到 CPU（经 UVA 在独立 CUDA stream 上按需取行）。
 - 分片：默认每个 DP rank 持独立 TP 分片副本；`embedding_across_dp=True` 时跨 TP+DP rank 共享一张嵌入表，用 **ETP 进程组**（`get_etp_group()`，见 05 §3.3）把单张表切到多 rank；`dp_shared_memory=True`（需 `cpu_offload=True`）让同节点 DP 副本共享 CPU 侧嵌入表（每节点每 TP shard 只存一份，省 host 内存，需足够 `/dev/shm`）。
-- **v0.30 新增**：offloaded engram lookup 的**异步 prefetch** + engram **DP sharding**（#56512，DSv4.1），lookup 与 forward 重叠，降低 CPU offload 延迟。
+- **v0.30 新增**：offloaded engram lookup 的**异步 prefetch** + engram **DP sharding**（#56512，DSv4.1），lookup 与 forward 重叠，降低 CPU offload 延迟。**v0.30.1rc0 区间**：移除 Engram 的 CUDA-alike 设备限制（#59171，`79a0307d74`）；共享内存解析时 THP 表保持私有（#59068，`ec5e0c352f`）。
 - 架构映射（`_NGRAM_LAYER_FIELDS`）：`DeepseekV41ForCausalLM→engram_layer_ids`、`Qwen4ExpForCausalLM/ForConditionalGeneration→ple_layer_ids`。
 - `VllmConfig.engram_config`（`config/vllm.py:382`）。
 - **v0.30 增量**：Engram **DP shared memory 默认开启**（#57651，`config/engram.py`）：`dp_shared_memory` 字段（`:52`）+ `resolve_dp_shared_memory`（`:86`）——同机 co-located 的多个 DP replica 默认共享 n-gram 嵌入表的 host 内存表（`models/deepseek_v41/nvidia/engram.py` 配套），避免每 replica 各占一份大表；ROCm 上 Engram 表留 host 内存（#57491，上一轮已记录）。

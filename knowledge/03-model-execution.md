@@ -1,6 +1,6 @@
 # 模型执行与编译优化
 
-> 版本：基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 版本：基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的"模型执行层"由三层组成：
@@ -18,13 +18,13 @@ vLLM 的"模型执行层"由三层组成：
 
 v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vllm_config.use_v2_model_runner` 二选一：
 
-- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:185`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，实现收敛在 `gpu/cudagraph_utils.py`：`capture_model` `:988`、`_maybe_ubatch_twin` `:224`，"DBO supports FULL CUDA graphs only" `:160`、"DBO does not support PIECEWISE cudagraphs" `:693`），此前 microbatched 步只能 eager/piecewise。
+- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:185`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，实现收敛在 `gpu/cudagraph_utils.py`：`capture_model` `:988`、`_maybe_ubatch_twin` `:224`，"DBO supports FULL CUDA graphs only" `:160`、"DBO does not support PIECEWISE cudagraphs" `:693`），此前 microbatched 步只能 eager/piecewise。**v0.30.1rc0 区间**：MRV2 支持**独立 draft 模型的投机解码**（#43091，`ef42093a36`，`vllm/v1/worker/gpu/spec_decode/` 下 draft-model proposer）——此前 V2 只支持 EAGLE/MTP 等 head 式 draft；one-token prompt tail 允许 FULL decode graph（#58400，`e7c903609f`）；Mamba/GDN metadata 跨 KV cache group 复用（#58762，`dd3bc9c72f`）；MRV2 支持 stock torch.compile 模式（#59079，`4e59d53ab5`）；Elastic EP 支持 MRV2（#53934，`171d1b9ef6`）；从未被 propose 的 draft slot 被拒绝（#58784，`fedbc3b564`）。
 - **Model Runner V1（legacy，回退用）**：`vllm/v1/worker/gpu_model_runner.py:479`（约 7700 行）。下文 §1.1/§1.2 的详细行号锚点仍以 V1 为准（V2 的方法名/流程一致，但行号不同）。
 
 `VllmConfig.use_v2_model_runner`（`vllm/config/vllm.py:701`）的判定优先级：
 1. 设了 `hisparse_config`（HiSparse）→ **强制 V2**（V1 直接报错）；
 2. 设了 `watermark_config`（水印）→ 强制 V2（覆盖 `=0`）；
-3. 显式 `VLLM_USE_V2_MODEL_RUNNER=0/1`（`vllm/envs.py:302`，默认 `None`）；
+3. 显式 `VLLM_USE_V2_MODEL_RUNNER=0/1`（`vllm/envs.py:303`，默认 `None`）；
 4. ROCm 上命中 `ROCM_DEFAULT_MRV1_ARCHITECTURES` 白名单的架构 → 回退 V1；
 5. 无 Triton → 回退 V1；
 6. `_get_v2_model_runner_unsupported_features()` 命中未支持特性 → 回退 V1；
@@ -77,7 +77,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 
 | load_format | loader | 说明 |
 |---|---|---|
-| `auto`/`hf`/`safetensors`/`fastsafetensors`/`instanttensor`/`mistral`/`npcache`/`pt` | `DefaultModelLoader` |（`fastsafetensors` 即 Fast Start 快速加载器，v0.30 起支持 **nnode>1** 多节点，#55468，用 GPU uuid 作 socket folder 标识，#56669） |
+| `auto`/`hf`/`safetensors`/`fastsafetensors`/`instanttensor`/`mistral`/`npcache`/`pt` | `DefaultModelLoader` |（`fastsafetensors` 即 Fast Start 快速加载器，v0.30 起支持 **nnode>1** 多节点，#55468，用 GPU uuid 作 socket folder 标识，#56669；**v0.30.1rc0 区间**：Fast Start 支持 **PP**（#55477，`af5b4857e1`）、daemon 持有权重计入 `gpu_memory_utilization`（#57298，`f5ed3d9c03`）、weight cache daemon 新增 `/health` 端点（#58552，`e7900156e1`）） |
 | `dummy` | `DummyModelLoader` | 随机权重（profiling / 测试） |
 | `modelexpress` | `ModelExpressModelLoader` |
 | `runai_streamer` / `runai_streamer_sharded` / `sharded_state` | `RunaiModelStreamerLoader` / `ShardedStateLoader` |
@@ -114,7 +114,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ### 2.5 配置/调优旋钮（加载）
 <!-- tags: load-config, 旋钮, load-format, quantization -->
 
-- `--load-format`（`arg_utils.py:1003`）：`auto/hf/safetensors/fastsafetensors/instanttensor/mistral/tensorizer/...`。
+- `--load-format`（`arg_utils.py:987`）：`auto/hf/safetensors/fastsafetensors/instanttensor/mistral/tensorizer/...`。
 - `LoadConfig`（`vllm/config/load.py:27`）：`download_dir`、`safetensors_load_strategy`（`lazy` 等）、`safetensors_prefetch_num_threads`、`safetensors_prefetch_block_size`、`model_loader_extra_config`（`enable_multithread_load`、`num_threads`）、`ignore_patterns`。
 - `--quantization`：选择量化后端。
 - **draft 模型加载（v0.30 统一，#57312）**：`get_draft_load_config`（`model_loader/utils.py:46`）是投机解码 draft 模型加载的唯一入口——`speculative_config.draft_load_config` 显式设置时优先；否则继承 target 的 `load_config`，但当 target 走 Fast Start（`load_format="ipc_cache"`）且 draft 可缓存（`is_draft_model_cacheable`）时，注入 `model_loader_extra_config.is_draft=True` 把 draft 路由到 weight-cache daemon 的**独立 draft group**（MTP draft 模型与 target 共享 daemon 但指纹不同）；不可缓存的 draft 方法回退 `load_format="auto"` 从磁盘加载。EAGLE/DFlash/DSpark 等 speculator 的 `load_model` 均改经此函数。
@@ -175,7 +175,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 - `NONE=0`：纯 eager。
 - `STOCK_TORCH_COMPILE=1`：标准 `torch.compile` 全图。
 - `DYNAMO_TRACE_ONCE=2`：单次 Dynamo trace，去 guard 避免重编译。
-- `VLLM_COMPILE=3`：**v1 默认**，vLLM 自定义 Inductor 后端 + 缓存 + piecewise 编译 + shape 特化 + 自定义 pass。
+- `VLLM_COMPILE=3`：**v1 默认**，vLLM 自定义 Inductor 后端 + 缓存 + piecewise 编译 + shape 特化 + 自定义 pass。**v0.30.1rc0 区间**：torch.compile 日志行标注正在编译的组件（#48133，`d5ee309314`）；standalone torch.compile 缓存 relocation 后加载修复（#52142，`cb4f016c5d`）；functionalized split slices 规范化用于 fusion pass（#57299，`b39f760cc7`）；MRV2 支持 stock torch.compile 模式（#59079）。
 
 ### 4.2 编译入口与后端
 <!-- tags: compile, backend, split-graph, piecewise, inductor-pass -->
@@ -210,7 +210,7 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 - `FULL_DECODE_ONLY = (FULL, NONE)`：decode 用 FULL，mixed prefill-decode 不 capture。
 - `FULL_AND_PIECEWISE = (FULL, PIECEWISE)`：**v1 默认**，decode 用 FULL，prefill/mixed 用 PIECEWISE。
 
-`separate_routine()` 的 mode 用 `decode_mode()` / `mixed_mode()` 取两个分量。
+`separate_routine()` 的 mode 用 `decode_mode()` / `mixed_mode()` 取两个分量。**v0.30.1rc0 区间**：DiffusionGemma 在 CUDA graph replay 下 attention mask 静默冻结的修复（#51994，`1117140edb`，`v1/attention/`）；GLM-5.3-Flash 启用 KDA prefill checkpoint（#56960，`3e2a7e74a5`）；MiniMax M3 PP 下 target embedding 与 MTP 共享（#58648，`a8e069f81b`）；K2 Horizon partial-RoPE 置换折叠进 q/k（及 norm）权重（#55335，`b81984879a`）；MiMo fused fp8 qkv_proj 配对状态跨权重加载调用保持（#58142，`77e52645e9`）；BERT/RoBERTa embedding 类改为类属性（#59348，`fb91712b38`）。
 
 ### 5.2 捕获哪些 batch size（capture sizes）
 <!-- tags: cudagraph, capture-sizes, 批大小, 捕获, spec-decode -->
@@ -338,8 +338,8 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ### CLI / 顶层
 <!-- tags: cli, 旋钮, enforce-eager, compilation-config, flags -->
 - `--enforce-eager`（`ModelConfig.enforce_eager`，`config/model.py:246`）：禁用 CUDA Graph + 编译，全 eager（调试/排障）。
-- `--compilation-config` / `-cc`（`arg_utils.py:1747`）：JSON 覆盖 `CompilationConfig`，如 `{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8]}`。
-- `--gpu-memory-utilization` / `--kv-cache-memory-bytes`（`arg_utils.py:1294`）：控制 KV 显存预算。
+- `--compilation-config` / `-cc`（`arg_utils.py:1754`）：JSON 覆盖 `CompilationConfig`，如 `{"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8]}`。
+- `--gpu-memory-utilization` / `--kv-cache-memory-bytes`（`arg_utils.py:1296`）：控制 KV 显存预算。
 - `--max-num-batched-tokens` / `--max-num-seqs`（:539/542）：决定 `max_cudagraph_capture_size` 上界与 capture sizes。
 
 ### CompilationConfig 关键字段

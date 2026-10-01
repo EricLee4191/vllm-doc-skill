@@ -1,6 +1,6 @@
 # 分布式并行（TP/PP/DP/EP）与 KV 传输
 
-> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 > 核心目录：`vllm/distributed/`、`vllm/config/parallel.py`、`vllm/v1/executor/`、`vllm/v1/worker/`。
 
 ---
@@ -72,7 +72,7 @@ world_size_across_dp = world_size * data_parallel_size
 - DP 的三种 LB 模式（`parallel.py`）：
   - 默认（internal）：vLLM 内部在 DP rank 间负载均衡。
   - `data_parallel_hybrid_lb`：每节点一个 AsyncLLM + API server，vLLM 在本地 DP rank 间 LB，外部 LB 在节点/副本间 LB。
-  - `data_parallel_external_lb`：K8s “one-pod-per-rank” 宽 EP 部署，仅 MoE。**v0.30 修复（#53743）**：`ParallelConfig.nnodes_within_dp` 在 external LB 下（`data_parallel_size_local` 固定 1）DP 副本数超过节点数时原 floor 除法会得 0，现 `max(..., 1)`（不跨节点的副本也占 1 个节点）；非 external 模式下 `nnodes % data_parallel_node_size != 0` 直接报错（此前静默 floor）。
+  - `data_parallel_external_lb`：K8s “one-pod-per-rank” 宽 EP 部署，仅 MoE。**v0.30 修复（#53743）**：`ParallelConfig.nnodes_within_dp` 在 external LB 下（`data_parallel_size_local` 固定 1）DP 副本数超过节点数时原 floor 除法会得 0，现 `max(..., 1)`（不跨节点的副本也占 1 个节点）；非 external 模式下 `nnodes % data_parallel_node_size != 0` 直接报错（此前静默 floor）。**v0.30.1rc0 区间**：in-flight 请求保持在同一 DP engine（#59017，`c68eb98b69`）；`add_dp_placement_groups` 不再要求 `ray[default]`（#57648，`91de237333`）。
 
 ### 2.4 Expert Parallelism (EP)
 <!-- tags: ep, expert-parallel, 专家并行, all2all, moe -->
@@ -82,7 +82,7 @@ world_size_across_dp = world_size * data_parallel_size
 - 典型组合 **DP+EP**：TP=1, DP=N，则 EP=N，每个 DP rank 持 1/N 的专家，MoE 层做 all2all。这是 DeepSeek 类模型的推荐部署。
 - **all2all 后端**（`all2all_backend`，`parallel.py:202`）：
   - `allgather_reducescatter`（默认，纯 NCCL 组合）
-  - `deepep_high_throughput` / `deepep_low_latency` / `deepep_v2`（DeepEP kernel；v2 支持 async finalize 与 shared expert overlap，#52781/#57236）
+  - `deepep_high_throughput` / `deepep_low_latency` / `deepep_v2`（DeepEP kernel；v2 支持 async finalize 与 shared expert overlap，#52781/#57236）。**v0.30.1rc0 区间**：WideEP 下 DeepEPv2 默认改为**自动选择 hybrid 模式**（#57991，`50239dfc4d`）
   - `mori_high_throughput` / `mori_low_latency`（MoRI，多节点）
   - `moonep`（**v0.30 新增**，MoonEP BF16 balanced EP 后端，#52101，`vllm/model_executor/layers/fused_moe/prepare_finalize/moonep.py`）
   - `nixl_ep`（NIXL）
@@ -179,7 +179,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - `pynccl_comm`（`PyNcclCommunicator`，`pynccl.py`）：直接调 NCCL C API 的通信子，是兜底/主力后端。
 - `ca_comm`（`CustomAllreduce`，`custom_all_reduce.py`）：vLLM 自研低延迟 all-reduce（P2P 直写），**仅 TP 组**、**仅同节点**、world_size ∈ {2,4,6,8,16}。
 - `qr_comm`（`QuickAllReduce`）：ROCm MI300 专用，补 custom allreduce。
-- `fi_ar_comm`（`FlashInferAllReduce`）：FlashInfer all-reduce。
+- `fi_ar_comm`（`FlashInferAllReduce`）：FlashInfer all-reduce。**v0.30.1rc0 区间**：eager 模式下不再 sync-police/重试 FlashInfer all-reduce workspace 创建（#58498，`764413559a`）；stateless process-group 超时时显式传递（#58611，`4406874e7c`）。
 - `aiter_ar_comm`（`AiterCustomAllreduce`）：ROCm AITER。
 - `symm_mem_comm`（`SymmMemCommunicator`）：torch symmetric memory。
 - `all2all_manager`：EP 的 all2all（见 §2.4）。
@@ -207,7 +207,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 
 ### 4.4 NCCL symmetric memory（NVLS）
 <!-- tags: symm-mem, nvls, nccl, 阈值, all-gather -->
-- `VLLM_USE_NCCL_SYMM_MEM=1`（默认 0，`envs.py:293`）启用；`pynccl_allocator.py::is_symmetric_memory_enabled()` 判断。
+- `VLLM_USE_NCCL_SYMM_MEM=1`（默认 0，`envs.py:294`）启用；`pynccl_allocator.py::is_symmetric_memory_enabled()` 判断。
 - all-reduce 阈值表 `NCCL_SYMM_MEM_ALL_REDUCE_CONFIG`（`all_reduce_utils.py:109`）：`min_world_size=4`，`custom_ar_preferred_ranges`（4 卡 16K–512K、8 卡 16K–128K 用 custom_AR），`always_use_above_world_size=8`（>8 卡全用 symm mem）。
 - all-gather / reduce-scatter 用 `should_nccl_symm_mem_ag_rs()`，走 NVLS（`_all_gather_symm_mem`/`_reduce_scatter_symm_mem`），用持久预注册的 scratch buffer（`_get_symm_scratch`）避免每次注册的 ~0.5ms 开销。
 
@@ -287,18 +287,18 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - `kv_connector_extra_config`：连接器自定义 JSON。
 - `kv_connector_module_path`：外部连接器模块路径（V1）。
 - `kv_load_failure_policy`：`recompute`（重算失败 block）/ `fail`（默认，直接失败）。
-- CLI：`--kv-transfer-config '{"kv_connector": "...", "kv_role": "..."}'`（`arg_utils.py:1737`，支持 `80m` 这种人读数字）。
+- CLI：`--kv-transfer-config '{"kv_connector": "...", "kv_role": "..."}'`（`arg_utils.py:1743`，支持 `80m` 这种人读数字）。
 
 ### 6.3 连接器工厂与注册（`kv_connector/factory.py`）
 <!-- tags: connector, factory, 注册, nixl, mooncake -->
 `KVConnectorFactory` 惰性注册/加载。已注册连接器（`factory.py:153` 起）：
-- `NixlConnector`（= `NixlPullConnector`，pull/READ 模式）、`NixlPullConnector`、`NixlPushConnector`（push/WRITE 模式）—— 基于 NIXL（RDMA）。v0.30：NIXL push prefill 支持 **attention-HMA 布局**（#50494），PP push prefill 场景下按 HMA 分组传输；**DCP 跨 MLA cache region 的 pull 修复**（#57389，`nixl/base_worker.py`）：`_match_local_and_remote_block_ids` 增加 `num_remote_blocks` 参数按**全局 DCP 位置**对齐 local/remote block（排除分配 padding），region 分组不一致且物理/逻辑块比 ≠1 时显式 `NotImplementedError`，远端页不覆盖请求范围时报错而非静默截断。
+- `NixlConnector`（= `NixlPullConnector`，pull/READ 模式）、`NixlPullConnector`、`NixlPushConnector`（push/WRITE 模式）—— 基于 NIXL（RDMA）。v0.30：NIXL push prefill 支持 **attention-HMA 布局**（#50494），PP push prefill 场景下按 HMA 分组传输；**DCP 跨 MLA cache region 的 pull 修复**（#57389，`nixl/base_worker.py`）：`_match_local_and_remote_block_ids` 增加 `num_remote_blocks` 参数按**全局 DCP 位置**对齐 local/remote block（排除分配 padding），region 分组不一致且物理/逻辑块比 ≠1 时显式 `NotImplementedError`，远端页不覆盖请求范围时报错而非静默截断。**v0.30.1rc0 区间**：NIXL PP push prefill 支持 **packed MLA KV 布局**（#50499，`6d3ea3c2c9`）。
 - `LMCacheConnectorV1`、`LMCacheMPConnector`（LMCache 外部 KV 存储）。
-- `MooncakeConnector`、`MooncakeStoreConnector`（Mooncake）。
+- `MooncakeConnector`、`MooncakeStoreConnector`（Mooncake）。**v0.30.1rc0 区间**：hybrid/MLA KV 打包成合并传输区域（coalesced transfer regions，#57952，`faacc13565`）；bootstrap 端口在启动期保持绑定（ROCm，#58967）+ bootstrap 注册超时重试（#58919）。
 - `FlexKVConnectorV1`、`HF3FSKVConnector`（HF3FS 文件系统）。
 - `OffloadingConnector`、`SimpleCPUOffloadConnector`（CPU offload）。
 - `MultiConnector`（组合多个子连接器）。
-- `MoRIIOConnector`、`DecodeBenchConnector`、`ExampleConnector`、`ExampleHiddenStatesConnector`。
+- `MoRIIOConnector`、`DecodeBenchConnector`、`ExampleConnector`、`ExampleHiddenStatesConnector`。**v0.30.1rc0 区间**：MoRIIO 支持 K3 DSpark hybrid READ（#57700，`30ae8248b6`）。
 
 ### 6.4 V1 连接器接口（`kv_connector/v1/base.py::KVConnectorBase_V1`）
 <!-- tags: kv-connector, 接口, scheduler-role, worker-role, hma -->
@@ -364,7 +364,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 
 目录 `vllm/distributed/elastic_ep/`。让 EP 组**运行时扩缩容**（scale up/down DP/EP），无需重启，配合 EPLB 在扩容时重排专家。
 
-- 开关：`enable_elastic_ep=True`（要求 `enable_eplb=True`、`pipeline_parallel_size==1`、非 external/hybrid LB，`parallel.py:891`；async EPLB 需 NIXL）。
+- 开关：`enable_elastic_ep=True`（要求 `enable_eplb=True`、`pipeline_parallel_size==1`、非 external/hybrid LB，`parallel.py:891`；async EPLB 需 NIXL）。**v0.30.1rc0 区间**：Elastic EP 支持 Model Runner V2（#53934，`171d1b9ef6`）。
 - 用 **stateless NCCL 组**（`StatelessGroupCoordinator`）管理 DP/EP，因为组会动态变化。`_init_elastic_ep_world`（`parallel_state.py:1730`）+ `_init_stateless_group`。
 - `elastic_state.py::ElasticEPScalingState`：扩缩容状态机。
   - scale up：`ScaleUpNewEngineState`（新引擎：PRE_KV_INIT→PREPARE→COMPLETE）/ `ScaleUpExistingEngineState`（PREPARE→SYNC_KV_CACHE_MEMORY_SIZE→COMMIT_SCALE_UP→COMPLETE）。
@@ -372,7 +372,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - `elastic_execute.py::ElasticEPScalingExecutor`：worker 侧执行 `prepare_reconfiguration`、`transfer_weights(old_dp_size, new_dp_size)`、`switch_and_prepare`/`switch_and_remove`（切换 active 组，`_replace_active_groups`）、`_perform_eplb_reshuffle`、`commit_scale_up/down`。
 - `standby_state.py`：`create_standby_groups` 预建目标 dp_size 的 standby DP/EP/EPLB 组，扩容时快速切换。
 - **CUDA graph 复用（v0.30，#54985）**：reconfiguration（扩缩容）后**复用**已捕获的 CUDA graph 而非重新 capture，避免每次扩缩容的 capture 开销。
-- 入口：`DPEngineCoreProc`（`vllm/v1/engine/core.py:2062`）持 `eep_scaling_state`；`ReconfigureDistributedRequest`（`vllm/v1/engine/__init__.py`）承载扩缩容请求。
+- 入口：`DPEngineCoreProc`（`vllm/v1/engine/core.py:2069`）持 `eep_scaling_state`；`ReconfigureDistributedRequest`（`vllm/v1/engine/__init__.py`）承载扩缩容请求。
 - env：`VLLM_ELASTIC_EP_SCALE_UP_LAUNCH`、`VLLM_ELASTIC_EP_DRAIN_REQUESTS`。
 
 ---
@@ -391,7 +391,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
   - 控制面 API（需 `ADMIN_API_KEY`，以 `X-API-Key` 头传递，**勿公开暴露**）：`POST /instances`（`{"role":"encode|prefill|decode|prefill_decode","url":...}`，Mooncake 另需 `ec_zmq_addrs`/`dp_size`）、`GET /instances`、`DELETE /instances?url=...`。注册幂等。
   - 拓扑由 role 决定：`encode`+`prefill_decode` → E+PD；`encode`+`prefill`+`decode` → E+P+D；standalone `decode` 必须有可用 `prefill`，否则 503。禁止混合 combined PD 与 standalone P/D。
   - 健康探测：每 `--probe-interval`（默认 5s）探测，`--probe-timeout`（默认 2s），连续 `--fail-threshold`（默认 3）次失败即停发新请求；健康实例自动重新加入，不可达实例 `--evicted-ttl`（默认 900s）后遗忘。摘除只停新路由，已路由请求保留端点（先 drain 再停实例）。
-  - 示例脚本 `disagg_1e1pd_example.sh`/`disagg_1e1p1d_example.sh` 设 `DYNAMIC_REGISTRATION=1` + `ADMIN_API_KEY` 走动态流程，默认仍静态路由。
+  - 示例脚本 `disagg_1e1pd_example.sh`/`disagg_1e1p1d_example.sh` 设 `DYNAMIC_REGISTRATION=1` + `ADMIN_API_KEY` 走动态流程，默认仍静态路由。**v0.30.1rc0 区间**：EPD encoder-only 异步步跳过采样（#58490，`53d2e16a97`）。
 
 ### 9.2 Weight Transfer（权重传输）
 <!-- tags: weight-transfer, 权重传输, rlhf, nccl, ipc, sharded-rdt -->
@@ -412,7 +412,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - **scheduler 侧** `AuxOutputSchedulerConnector`（`connector.py:44`）：随每步构建 `AuxOutputConnectorMetadata`（含 `PackedBlockHashes`，按请求打包 block hash）；请求结束时 `request_finished` 释放引用。scheduler 钩子在 `vllm/v1/core/sched/scheduler.py`：init `:394-396`、`build_connector_meta` `:1475-1477`、`request_finished` `:1536-1537` 与 `:2564-2565`、`take_output` `:2074-2076`。
 - **worker 侧** `AuxOutputWorkerConnector`（`worker.py:83`）：`max_bytes` 缺省推导为 `kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes`（`worker.py:122-127`）；`max_pending_batches = 2 * max_num_seqs`。
 - **存储** `BlockObjectStore`（`store.py:100`）：mmap arena + LRU 驱逐（`_evict_to_fit` `store.py:125`）；**fail-closed**——空间不足且无法驱逐时抛 `BlockObjectStoreError`（`store.py:23`）而不是静默丢弃；后台清理线程 `BackgroundBlockObjectStore`（`store.py:27`）。
-- **输出通路**：`ModelRunnerOutput.aux_output_connector_output`（`vllm/v1/outputs.py:299`）；routed-expert 数据经 `routed_experts.py`（`RoutedExpertsBuffer:27`，key 前缀 `vllm-artifact/{namespace}/`，`publish_routed_experts:182`）发布。
+- **输出通路**：`ModelRunnerOutput.aux_output_connector_output`（`vllm/v1/outputs.py:302`）；routed-expert 数据经 `routed_experts.py`（`RoutedExpertsBuffer:27`，key 前缀 `vllm-artifact/{namespace}/`，`publish_routed_experts:182`）发布。
 
 ---
 

@@ -1,6 +1,6 @@
 # 量化与多硬件平台
 
-> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的量化体系分两条主线：
@@ -61,18 +61,18 @@ vLLM 的量化体系分两条主线：
 - 支持 4-bit 对称（`uint4b8`）与 8-bit 对称（`uint8b128`）；weight-only（W4A16/W8A16）。
 - 额外字段：`desc_act`（act-order）、`dynamic`（GPTQModel 的 per-module 正则覆盖，`"+:"`/`"-:"` 前缀）、`modules_in_block_to_quantize`（autoround 标记）。
 - `maybe_update_config` 会读 safetensors metadata 自动推断哪些层真的被量化了（:275）。
-- kernel 同 AWQ：Marlin 优先，MoE 回退 `MoeWNA16Config`。
+- kernel 同 AWQ：Marlin 优先，MoE 回退 `MoeWNA16Config`。**v0.30.1rc0 区间**：`moe_wna16` 的 w13 zero-point shard 拆分修复（8-bit 非对称 GPTQ MoE，#58950，`9b29370524`）。
 - 与 AWQ 的取舍：GPTQ 4-bit 精度通常略好于 AWQ 4-bit（逐层 Hessian 校准），两者都显著优于 BF16 的显存占用；GPTQ 支持 8-bit 是独有优势。
 
 **ModelOpt（`modelopt.py`，NVIDIA TensorRT-Model-Optimizer 产物）**
 - `ModelOptFp8Config`（min capability 80）：FP8 W8A8，支持 per-tensor / per-channel-per-tensor（`ModelOptFp8PcPtLinearMethod`）/ per-block weight-only（`ModelOptFp8PbWoLinearMethod`）三种 linear method；可带 KV cache 量化（`kv_cache_quant_method`）。
-- `ModelOptNvFp4Config`（`modelopt_fp4`，min capability 75）：NVFP4（fp4_e2m1 + fp8 block scale，group_size=16），Blackwell 最优显存/吞吐组合；有 W4A16 变体 `ModelOptNvFp4W4A16LinearMethod`。**v0.30.1rc0 区间**：per-token NVFP4 MoE 后端（#57176）——`trtllm_nvfp4_moe.py` 现同时支持 `(kNvfp4Static, kNvfp4Dynamic)` 与 `(kNvfp4Static, kNvfp4DynamicToken)` 组合；TRTLLM-Gen 系 MoE（nvfp4/mxfp4/fp8）在 modular path 下 top-k finalize 延迟到 `MoEKernel` 内执行（#58635，`fused_moe/modular_kernel.py`/`moe_output.py`）。
+- `ModelOptNvFp4Config`（`modelopt_fp4`，min capability 75）：NVFP4（fp4_e2m1 + fp8 block scale，group_size=16），Blackwell 最优显存/吞吐组合；有 W4A16 变体 `ModelOptNvFp4W4A16LinearMethod`。**v0.30.1rc0 区间**：per-token NVFP4 MoE 后端（#57176）——`trtllm_nvfp4_moe.py` 现同时支持 `(kNvfp4Static, kNvfp4Dynamic)` 与 `(kNvfp4Static, kNvfp4DynamicToken)` 组合；TRTLLM-Gen 系 MoE（nvfp4/mxfp4/fp8）在 modular path 下 top-k finalize 延迟到 `MoEKernel` 内执行（#58635，`fused_moe/modular_kernel.py`/`moe_output.py`）。**v0.30.1rc0 区间**：新增 **per-token NVFP4 CuTe-DSL MoE 后端**（#50030，`0103a9b96f`）。
 - `ModelOptMxFp8Config`（`modelopt_mxfp8`，min capability 80）：MXFP8（e8m0 scale，1x32 block），Marlin kernel 支持 SM80+。
 - `ModelOptMixedPrecisionConfig`（`modelopt_mixed`）：混合精度（不同层不同 bit）。
 - 识别方式：`override_quantization_method` 读 `hf_quant_config.json` 里的 `quant_algo`（FP8/NVFP4/MXFP8）。
 
 **compressed-tensors（`compressed_tensors/`，min capability 70）**
-- llm-compressor 的通用格式：一个 config 里按 layer 声明 scheme（`schemes/` 下有 W8A8-FP8、W4A16-INT、W8A16、MXFP8、NVFP4 等），`CompressedTensorsConfig.from_config` 解析 `format`/`config_groups`。
+- llm-compressor 的通用格式：一个 config 里按 layer 声明 scheme（`schemes/` 下有 W8A8-FP8、W4A16-INT、W8A16、MXFP8、NVFP4 等），`CompressedTensorsConfig.from_config` 解析 `format`/`config_groups`。**v0.30.1rc0 区间**：CT WNA16 MoE 改用规范 N-first 权重格式（#52798，`c01368fd64`）；sleep(level=2) 不再把 compressed-tensors 的 KV scale 清零（#57163，`f4917dadc8`）。
 - 是 **KV cache 量化 scale 校准**（per-head scale，llm-compressor 路径）的主要载体；也支持 embedding 量化（`compressed_tensors_embedding.py`）与 MoE（`compressed_tensors_moe/`）。
 
 **MXFP4（`mxfp4.py`，min capability 80）**
@@ -108,7 +108,7 @@ vLLM 的量化体系分两条主线：
 - 调度表：`online/base.py:88` 的 `_ONLINE_LINEAR_METHODS` / `_ONLINE_MOE_METHODS` 按 `QuantKey` 分发到具体 method。
 
 **KV cache 量化（与权重量化正交）**
-- `CacheConfig.cache_dtype`（`vllm/config/cache.py:111`，CLI `--kv-cache-dtype`）：`auto` / `fp8` / `fp8_e4m3` / `fp8_e5m2` / `fp8_inc` / `fp8_ds_mla` / `int8_per_token_head` / `fp8_per_token_head` / `int4_per_token_head` / `nvfp4` / `nvfp4_4over6` / `turboquant_k8v4` / `turboquant_4bit_nc` / `turboquant_k3v4_nc` / `turboquant_3bit_nc`。
+- `CacheConfig.cache_dtype`（`vllm/config/cache.py:123`，CLI `--kv-cache-dtype`）：`auto` / `fp8` / `fp8_e4m3` / `fp8_e5m2` / `fp8_inc` / `fp8_ds_mla` / `int8_per_token_head` / `fp8_per_token_head` / `int4_per_token_head` / `nvfp4` / `nvfp4_4over6` / `turboquant_k8v4` / `turboquant_4bit_nc` / `turboquant_k3v4_nc` / `turboquant_3bit_nc`。
 - per-tensor scale 从 checkpoint 加载：`BaseKVCacheMethod`（`quantization/kv_cache.py:43`）在 `Attention` 层上注册 `q_scale/k_scale/v_scale/prob_scale`（`KVCacheScaleParameter`，初始 -1.0 哨兵值）；`Fp8KVCacheMethod`、`ModelOptKVCacheMethod` 等继承它。scale 名字映射由 `QuantizationConfig.get_cache_scale_mapper()`（`base_config.py:210`）统一处理（`.kv_scale` → `.attn.k_scale` 等）。
 - per-token-head scale（`*_per_token_head`）在 kernel 写 cache 时动态计算，`BaseKVCacheMethod.process_weights_after_loading` 直接置 1.0 并删除参数（`kv_cache.py:76`）。
 - `kv_cache_dtype_skip_layers`（`cache.py:155`）：按层跳过 KV 量化（首尾层保持高精度，`Platform._align_heterogeneous_kv_block_size` 负责 block 对齐）。
@@ -174,7 +174,7 @@ vLLM 的量化体系分两条主线：
   - MLA：SM100 → `[FLASHINFER_MLA, TOKENSPEED_MLA, CUTLASS_MLA, FLASH_ATTN_MLA, FLASHMLA, TRITON_MLA, *sparse]`（FP8 KV 时 FlashInfer 优先）；SM120 → `[TRITON_MLA, FLASHINFER_MLA_SPARSE_SM120]`；其他 → `[FLASH_ATTN_MLA, FLASHMLA, ...]`。
   - 每个候选调 `validate_configuration()` 过滤（如 block_size 不兼容），选优先级最高者；`--attention-backend` 可强制。
 - `check_and_update_config`（:321）：`worker_cls` 默认 `vllm.v1.worker.gpu_worker.Worker`；WSL2 + `--cpu-offload-gb` + cudagraph 的 pinned memory 警告。
-- 部署要点：FP8 需 SM89+（`torch._scaled_mm` 限制 e4m3fn）；DeepGEMM（`VLLM_USE_DEEP_GEMM`，默认开）用于 Hopper FP8 block GEMM；`VLLM_BATCH_INVARIANT=1` 时 FP8 linear 走 BF16 dequant 路径保证可复现（`fp8.py:439`）。**v0.30 增量**：DeepGEMM 构建修复（#57554，`cmake/external_projects/deepgemm.cmake`）——pinned 到 vLLM fork 的 `e1f418c2`（含 vllm-project/DeepGEMM#12 的 CUDA 12.x layout header fix），CUDA 12.9 release 构建恢复可用。**v0.30.1rc0 区间**：`is_deep_gemm_supported()`（`utils/deep_gemm.py`）改为**先查 `is_supported_arch`** 再查其他条件（#58073），避免非 Hopper 架构上无谓的库探测；`VLLM_BATCH_INVARIANT` 下 NCCL>=2.31 时 `NCCL_ALGO="ring,tree;allreduce:tree"`（#58179，`determinism/batch_invariant.py`），XPU 平台同步支持 batch-invariant Dense/MoE 路径（#55881，`platforms/xpu.py`）；`QuantFP8` 新增 `forward_cuda` 类分派（#58136，`input_quant_fp8.py`），CUDA fallback 不再经虚调用重入 `_DecodeConcatQuantFP8`。
+- 部署要点：FP8 需 SM89+（`torch._scaled_mm` 限制 e4m3fn）；DeepGEMM（`VLLM_USE_DEEP_GEMM`，默认开）用于 Hopper FP8 block GEMM；`VLLM_BATCH_INVARIANT=1` 时 FP8 linear 走 BF16 dequant 路径保证可复现（`fp8.py:439`）。**v0.30 增量**：DeepGEMM 构建修复（#57554，`cmake/external_projects/deepgemm.cmake`）——pinned 到 vLLM fork 的 `e1f418c2`（含 vllm-project/DeepGEMM#12 的 CUDA 12.x layout header fix），CUDA 12.9 release 构建恢复可用。**v0.30.1rc0 区间**：`is_deep_gemm_supported()`（`utils/deep_gemm.py`）改为**先查 `is_supported_arch`** 再查其他条件（#58073），避免非 Hopper 架构上无谓的库探测；`VLLM_BATCH_INVARIANT` 下 NCCL>=2.31 时 `NCCL_ALGO="ring,tree;allreduce:tree"`（#58179，`determinism/batch_invariant.py`），XPU 平台同步支持 batch-invariant Dense/MoE 路径（#55881，`platforms/xpu.py`）；`QuantFP8` 新增 `forward_cuda` 类分派（#58136，`input_quant_fp8.py`），CUDA fallback 不再经虚调用重入 `_DecodeConcatQuantFP8`；sm_120 batch-invariant matmul 表新增 TP=2/4/8 per-rank shapes（#58495，`4e0a414c44`）；batch invariance 测试模型扩到 gemma-2/SmolLM2/Qwen2.5-Coder/Llama-3.2-1B（#54441，`863475eb9c`）。
 
 **ROCm（`rocm.py`，`RocmPlatform` :488）**
 - `device_type="cuda"`（HIP 复用 torch.cuda API）、`dispatch_key="CUDA"`、`dist_backend="nccl"`（RCCL）、`device_control_env_var="CUDA_VISIBLE_DEVICES"`（也认 `ROCR_VISIBLE_DEVICES` 的 ray noset 变量）。
@@ -188,14 +188,15 @@ vLLM 的量化体系分两条主线：
 - **v0.30 增量（模型级 ROCm 路径）**：
   - **Hy4 ROCm 路径**（#57526，`models/hy_v4/amd/model.py`，+718 行）：Hy4 在 ROCm 上有独立模型实现，backbone 走 torch.compile。
   - **MiniMax-M3 packed LBHNC AITER QK-norm 融合**（#54535，`models/minimax_m3/amd/model.py`）：ROCm 上启用 packed LBHNC 布局的 AITER `fused_qknorm_idxrqknorm` 融合（QK-norm + indexer RoPE + QK-norm），sparse attention 的 slot 用 `minimax_m3_rebase_slots_to_page16` 重基到 page-16，LHBNC/LBHNC 两种布局均支持。
+  - **v0.30.1rc0 区间**：DSv4.1 AITER 上 opt-in **a4w4（FP4 激活）MoE**（#58819，`77e8b02c8d`）；MiMo-V2.6 MXFP4 支持 gfx942（#58262，`16d4ac4ba3`）；GLM-5.3-Flash stride-aware decode KDA（#57979，`3627a6a124`）；DSv4/DSv4.1 ROCm sparse prefill 复用共享 prefill chunk plan（#58405/#58539）；PLE prefetch pinned buffer 延迟分配（#58797，`91dab0eb7f`）。
 
 **CPU（`cpu.py`，`CpuPlatform` :98）**
 - `dist_backend="gloo"`，`inference_mode()` 回退 `torch.no_grad()`，`is_pin_memory_available()=False`，`support_hybrid_kv_cache()=True`。
-- `supported_dtypes`（:107）：按 CPU 架构（x86/ARM/POWERPC/RISCV）与 macOS ARM BF16 特性探测。
+- `supported_dtypes`（:107）：按 CPU 架构（x86/ARM/POWERPC/RISCV）与 macOS ARM BF16 特性探测。**v0.30.1rc0 区间（PowerPC/POWER10）**：auto dtype 优先 bfloat16（#58528，`ae66f9a97c`）；POWER10 用 VSX 启用 W4A16（AWQ & GPTQ）量化（#59149，`72e7874fa6`）。
 - attention：只有 `CPU_ATTN`；MLA 模型在 x86 + AMX tile 时用 `AMX_MLA`，否则 `CPU_MLA`（参考实现，且强制 `block_size=16`，:256；非 AMX MLA 还强制关 chunked prefill 和 prefix caching，:487）。
 - `check_and_update_config`（:198）：默认 `block_size=128`（非 32 倍数会警告）；`worker_cls` 默认 `vllm.v1.worker.cpu_worker.CPUWorker`；`VLLM_ENABLE_V1_MULTIPROCESSING=1` 时强制 `mp` executor（OMP 线程绑定需要）；`VLLM_CPU_KVCACHE_SPACE`（GB）可指定 KV cache 空间；自动 `LD_PRELOAD` libgomp/libtcmalloc；AVX-512BF16 时 SSM conv state 用 SD layout。
 - 量化：无白名单（全量方法可用），但实际 kernel 由 `choose_mp_linear_kernel` 按平台过滤——AWQ/GPTQ 走 `CPUWNA16LinearKernel`（`mixed_precision/cpu.py:20`，要求 group_size 偶数、input size 32 倍数）；`VLLM_CPU_INT4_W4A8`（默认 True）启用 INT4 W4A8。**v0.30 新增 CPU FP8 W8A8 linear/MoE**（#49942，`csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp` + `moe_fp8_w8a8.cpp`，基于 sgl-kernels），CPU 上也能跑 FP8 W8A8 模型。
-- 部署要点：`VLLM_CPU_OMP_THREADS_BIND`（线程绑核，默认 auto）、`VLLM_CPU_NUM_OF_RESERVED_CPU`、`VLLM_CPU_ATTN_SPLIT_KV`（默认 True）；NUMA 拓扑发现（`discover_numa_topology`）供 KV transfer 预留核。**v0.30 新增**：`--device-memory-utilization` CLI 别名（#56547，`CacheConfig.device_memory_utilization` property，非 GPU 平台对 `gpu_memory_utilization` 的设备中性别名）。
+- 部署要点：`VLLM_CPU_OMP_THREADS_BIND`（线程绑核，默认 auto）、`VLLM_CPU_NUM_OF_RESERVED_CPU`、`VLLM_CPU_ATTN_SPLIT_KV`（默认 True）；NUMA 拓扑发现（`discover_numa_topology`）供 KV transfer 预留核。**v0.30 新增**：`--device-memory-utilization` CLI 别名（#56547，`CacheConfig.device_memory_utilization` property，非 GPU 平台对 `gpu_memory_utilization` 的设备中性别名）。**v0.30.1rc0 区间**：CPU 向量化 Sampler kernel（#53913，`583637f126`，`v1/sample/`）；Whisper W4A16 量化走 CPU WNA16 kernel（#58268，`5faf81a429`）；Mamba2 量化 in_proj 权重/尺度在 TP>1 下的加载修复（#58083，`d71f662606`）；DiffusionGemma 窄 canvas 同步调度（#59107，`e006d761a5`）。
 
 **XPU（`xpu.py`，`XPUPlatform` :103）**
 - `dist_backend="xccl"`（oneCCL），`device_control_env_var="ZE_AFFINITY_MASK"`，`ray_device_key="GPU"`。
@@ -204,6 +205,7 @@ vLLM 的量化体系分两条主线：
 - `check_and_update_config`（:284）：XPU Graph 实验性（需 `VLLM_XPU_ENABLE_XPU_GRAPH=1` 且 PyTorch 支持，仅单卡）；禁用多个 fusion pass（`fuse_gemm_comms`、`fuse_allreduce_rms`、`fuse_attn_quant` 等）；UVA offload 时关 Inductor static launcher；`worker_cls` 默认 `vllm.v1.worker.xpu_worker.XPUWorker`；强制 `spawn` 多进程、`UCX_MEMTYPE_CACHE=n`、`shutdown_timeout=5`。
 - **v0.30 增量**：
   - **XPU fused top-k/top-p sampler kernel**（#57277，`vllm/v1/sample/ops/topk_topp_sampler.py`）：`xpu_sampler_supported()`（`:129`）在 XPU 平台且 `VLLM_XPU_USE_SAMPLER_KERNEL=1`（默认开）时启用 `xpu_sample()`（`:151`）——fused kernel 直接采样，**不做 vocab 排序、不物化概率张量**，统计上等价于 `random_sample`（噪声来自 device 默认 generator，恒随机采样）。限制：请求需要 per-request seed 或 greedy 时不可用。Model Runner V2 的 sampler（`vllm/v1/worker/gpu/sample/sampler.py`）也接入（`use_xpu_sampler` `:92-93`）。
+  - **v0.30.1rc0 区间**：EC producer 实例（encoder-only）使用 encoder-only model runner（#59320，`6945d142e5`）。
   - **`moe_align_block_size` 7-arg 回退**（#57855，`_custom_ops.py:2274`）：XPU CI 上旧版 torch 只支持 7 参数签名，加 fallback。
 - FP8 linear 默认 **W8A16**（weight-only），`--linear-backend xpu` 强制 W8A8，`--linear-backend xpu_woq` 显式 W8A16（`docs/features/quantization/online.md`）。
 - GDN 模型 block_size 需 64 倍数（`update_block_size_for_backend`，:388）。

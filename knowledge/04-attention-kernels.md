@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 
@@ -49,7 +49,7 @@ v1 的 attention 抽象位于 `vllm/v1/attention/`，核心是"一个 backend = 
   - SM120：`TRITON_MLA → FLASHINFER_MLA_SPARSE_SM120`
   - 其他：`FLASH_ATTN_MLA → FLASHMLA → FLASHINFER_MLA → TRITON_MLA → FLASH_ATTN_MLA_SPARSE → FLASHMLA_SPARSE`
 
-**ROCm 平台**（`vllm/platforms/rocm.py:611`）：非 MLA 为 `ROCM_ATTN → ROCM_AITER_FA → ROCM_AITER_UNIFIED_ATTN → TRITON_ATTN → TURBOQUANT`；MLA 为 `ROCM_AITER_MLA → TRITON_MLA → ROCM_AITER_TRITON_MLA`（sparse 用 `ROCM_AITER_MLA_SPARSE`）。
+**ROCm 平台**（`vllm/platforms/rocm.py:473`）：非 MLA 为 `ROCM_ATTN → ROCM_AITER_FA → ROCM_AITER_UNIFIED_ATTN → TRITON_ATTN → TURBOQUANT`；MLA 为 `ROCM_AITER_MLA → TRITON_MLA → ROCM_AITER_TRITON_MLA`（sparse 用 `ROCM_AITER_MLA_SPARSE`）。
 
 **CPU 平台**（`vllm/platforms/cpu.py:138`）：MLA 优先 `AMX_MLA`（x86 + AMX tile 支持），否则 `CPU_MLA`；非 MLA 用 `CPU_ATTN`。
 
@@ -72,7 +72,7 @@ v1 的 attention 抽象位于 `vllm/v1/attention/`，核心是"一个 backend = 
 v1 的 scheduler 把每个 step 的 batch 拆成 **prefill 段**（query_len > 1）与 **decode 段**（query_len == 1，或 spec-decode 的 1+draft）。不同 backend 处理这两段的方式不同：
 
 - **FLASH_ATTN**：统一走 `flash_attn_varlen_func`（`flash_attn.py:1504`），prefill 与 decode 用同一个 varlen kernel，靠 `cu_seqlens_q`/`seqused_k`/`block_table` 区分。KV cache 逻辑 shape `(B, H, N, 2*D)`，forward 里 `kv_cache.transpose(1,2).split(head_size)` 拆出 K/V。支持 cascade attention（`use_cascade` 分支）。
-- **FLASHINFER**：`FlashInferMetadata` 显式分 `prefill`（`FIPrefill`/`TRTLLMPrefill`）与 `decode`（`FIDecode`/`FlashInferTrtllmAPIDecode`）两个 wrapper（`flashinfer.py:642`）。decode kernel 由 `FlashInferDecodeKernel` 枚举选择：`XQA`（SM90）或 `TRTLLM_GEN`（SM100 trtllm-gen）。prefill 可选 TRTLLM ragged kernel。这是"prefill/decode 分路"最典型的 backend。
+- **FLASHINFER**：`FlashInferMetadata` 显式分 `prefill`（`FIPrefill`/`TRTLLMPrefill`）与 `decode`（`FIDecode`/`FlashInferTrtllmAPIDecode`）两个 wrapper（`flashinfer.py:642`）。decode kernel 由 `FlashInferDecodeKernel` 枚举选择：`XQA`（SM90）或 `TRTLLM_GEN`（SM100 trtllm-gen）。prefill 可选 TRTLLM ragged kernel。这是"prefill/decode 分路"最典型的 backend。**v0.30.1rc0 区间**：FlashInfer 升级 0.7.0.post1（#59323，`678baf5372`）；FlashInfer trtllm-gen 启用 fused multi-step draft decode（#58371，`35d6fb3187`）。
 - **TRITON_ATTN**：默认走 `unified_attention`（`triton_attn.py:663`，`vllm/v1/attention/ops/triton_unified_attention.py` 的 `kernel_unified_attention`），单 kernel 同时处理 prefill+decode；`AttentionConfig.use_prefill_decode_attention=True` 时改用分离的 `context_attention_fwd`（prefill）+ decode kernel。
 - **MLA**：`MLAAttention.forward_impl`（`mla_attention.py:893`）按 `num_mqa_tokens`（decode）/`num_mha_tokens`（prefill）切分：decode 段调 `impl.forward_mqa()`，prefill 段调 `impl.forward_mha()`（若实现）。prefill 后端由独立的 `MLAPrefillBackendEnum` 选择（见 §4.2）。
 - **SSM/线性注意力（GDN 等）**：`backends/recoverssm_metadata.py` 的 `RecoverSSMMetadata` 抽象负责 spec decode 下 SSM 状态的"回滚/恢复"——`commit_recoverssm_state(num_accepted_tokens)` 按实际接受 token 数产出 `RecoverSSMPostprocessMetadata`（供 align-mode 前缀缓存的 postprocess）。这是混合架构（Gated DeltaNet 等）+ 投机解码的配套机制。
@@ -114,6 +114,7 @@ MLA（DeepSeek 系列）的 KV cache 存 latent（`kv_c` + `k_pe`），backend �
   - **sparse MLA 准备开销削减（#57458）**：`mla/sparse_utils.py` 的 index-remap Triton kernel 重构（`ConvertReqIndexToGlobalIndexKernel.sparse_mla_index_remap_kernel`，`NUM_TOPK_TOKENS` 提升为 constexpr、multi-tile 支持），降低 GLM 系 sparse MLA 的 metadata 准备成本。
   - **ROCm DSV4 自适应验证（#52362）**：`mla/indexer.py` 的 `DeepseekV4IndexerBackend.supports_device_cpu_query_lens_mismatch` 在 ROCm 上返回 True（adaptive verification 走 per-token flattened indexer 路径，row ownership 从 device decode lengths 推导）；V4.1 不继承该放宽（仅验证过 V4 路径）。
   - **GDN stateless first-chunk 分类修复（#51565，`backends/gdn_attn.py`）**：无 spec mask 时改用 `seq_lens_cpu_upper_bound <= query_len` 判定"无先前状态"（首 chunk 按 prefill 处理以 mask 回收的 state），并用 `is_prefilling` 排除 capture batch（其 `seq_len == query_len` 但非 prefill）；尾 padding 从 prefill 计数中剔除。
+  - **v0.30.1rc0 区间（sparse MLA 系列）**：GLM-5.3-Flash SM90 sparse MLA 的 fp8 plan dtype 修复 + indexer prefill workspace 右尺寸化（#55222，`c37f86e572`）；ROCm 启用 AITER Gluon sparse MLA kernel（#53492，`70ae0b7435`）；ROCm DSv4.1 paged MXFP4 sparse indexer 走 AITER MQA-logits kernel（#58671，`63b9931b73`）；ROCm AITER ASM round-robin decode 路由支持 DCP 多 token 验证（#56861，`25624f65cf`）；ROCm ragged sparse-MLA indices 构建时丢弃 -1 哨兵（#58058，`75fad5bbef`）；HiSparse 三重修复——MTP 验证行用 union residency kernel 解析（#59235）、无 host backing 不分配 GPU 页（#59036）。
   - **v0.30.1rc0 区间**：SM120 NoPE sparse MLA（#55277）——`csrc/libtorch_stable/cache_kernels.cu` 的 `concat_and_cache_ds_mla_kernel` 在 `pe_dim == 0`（NoPE）时把保留的 RoPE 尾部清零，SM120 上 NoPE sparse MLA 不再读到未初始化内存。Kimi-K3 变长 decode（#52988）——`FlashInferMLADecodeMetadata` 数据类化（`flattened_block_table`/`seq_lens`/`row_req`/`query_len`/`query_start_loc`/`max_query_len`），`_cudagraph_support = ALWAYS`、`query_len_support = VARLEN`；`flashattn_mla`/`flashmla`/`rocm_aiter_mla` 的 metadata builder 签名新增 `max_query_len` 参数；`kimi_k3/nvidia/kda_metadata.py` 的 `KimiK3KDAMetadataBuilder` 同样 `ALWAYS` + `supports_device_cpu_query_lens_mismatch()=True`；`model_states/mamba_hybrid.py` 的 max_query_len 优先取 `input_batch.max_query_len`。
 
 **MLA prefill 后端**独立选择（`mla/prefill/selector.py`），`MLAPrefillBackendEnum`：`FLASH_ATTN` / `FLASHINFER` / `TRTLLM_RAGGED` / `TOKENSPEED_MLA` / `ROCM_AITER_FA` / `CPU_NATIVE`。优先级（`_get_mla_prefill_backend_priorities`）：SM100 且 DSV3 维度（192/64/256）时 `TRTLLM_RAGGED` 优先；否则 `FLASH_ATTN` 优先。可用 `AttentionConfig.mla_prefill_backend` 显式指定。
@@ -209,15 +210,15 @@ Triton kernel 分布在三处：
 ### 7.1 CLI / 配置
 <!-- tags: cli, 配置, attention-backend, attention-config, flags -->
 
-- **`--attention-backend <NAME>`**（`arg_utils.py:1032`）：全局指定 backend，取值即 `AttentionBackendEnum` 名（如 `FLASH_ATTN`、`FLASHINFER`、`TRITON_ATTN`、`FLASHMLA`、`TRITON_MLA`）。显式指定且不合法会直接报错。
-- **`--attention-config` / `-ac`**（`arg_utils.py:1750`）：传 `AttentionConfig` 的 JSON/dict，可设任意字段，例如：
+- **`--attention-backend <NAME>`**（`arg_utils.py:1035`）：全局指定 backend，取值即 `AttentionBackendEnum` 名（如 `FLASH_ATTN`、`FLASHINFER`、`TRITON_ATTN`、`FLASHMLA`、`TRITON_MLA`）。显式指定且不合法会直接报错。
+- **`--attention-config` / `-ac`**（`arg_utils.py:1756`）：传 `AttentionConfig` 的 JSON/dict，可设任意字段，例如：
   - `--attention-config '{"backend": "FLASHINFER"}'`
   - `--attention-config '{"flash_attn_version": 3}'`
   - `--attention-config '{"use_trtllm_attention": true}'`
   - `--attention-config '{"mla_prefill_backend": "TRTLLM_RAGGED"}'`
   - `--attention-config '{"backend_per_kind": {"mla_attention": "FLASHINFER_MLA", "sliding_window_mla": "TRITON_MLA"}}'`
 - **`--mamba-backend`**：SSM/线性层 backend（`MAMBA1`/`MAMBA2`/`GDN_ATTN`/`LINEAR`/`SHORT_CONV`）。
-- 注意：`--attention-backend` 与 `attention_config.backend` 不能同时设（`arg_utils.py:2524` 会报错）。
+- 注意：`--attention-backend` 与 `attention_config.backend` 不能同时设（`arg_utils.py:2532` 会报错）。
 
 ### 7.2 `AttentionConfig` 关键字段（`vllm/config/attention.py`）
 <!-- tags: attention-config, 字段, backend, mla-prefill, kv-dtype -->
@@ -240,7 +241,7 @@ Triton kernel 分布在三处：
 ### 7.3 相关环境变量（`vllm/envs.py`）
 <!-- tags: env-vars, 环境变量, kv-layout, flashinfer, rocm -->
 
-- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1816`）。
+- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1855`）。
 - `VLLM_BATCH_INVARIANT` — 批不变模式（影响 backend 选择，如 FlexAttention 默认 block 16；MLA/Mamba 需支持 batch invariance）。
 - `VLLM_USE_FLASHINFER_SAMPLER`（默认 True）— 采样用 FlashInfer。
 - `VLLM_USE_FLASHINFER_MOE_INT4` — FlashInfer INT4 MoE。

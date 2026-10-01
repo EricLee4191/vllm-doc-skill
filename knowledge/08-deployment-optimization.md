@@ -1,6 +1,6 @@
 # 部署、API 服务与性能调优
 
-> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 部署形态总览
 <!-- tags: deployment, serve, docker, offline, api-server, 部署 -->
@@ -25,7 +25,7 @@ vLLM 的入口统一由 CLI 分发：`pyproject.toml` 中 `vllm = "vllm.entrypoi
 - `LLM.generate(prompts, sampling_params)` / `LLM.chat(conversations, ...)` — 同步批量生成；
 - `LLM.enqueue` / `LLM.enqueue_chat` + `LLM.wait_for_completion` — 异步队列式提交；
 - `LLM.embed` / `LLM.classify` / `LLM.score` / `LLM.encode` — pooling 模型；
-- `LLM.sleep(level=1|2)` / `LLM.wake_up()` — sleep mode（`enable_sleep_mode=True` 开启，权重 offload 到 CPU、释放 KV cache，可释放 90%+ 显存，见 `docs/features/sleep_mode.md`）。**v0.30 增量（#57891）**：level-2 sleep 可**保留冻结权重**——`ModelConfig.sleep_preserve_parameter_names`（CLI `--sleep-preserve-parameter-names`）按 glob 指定跨 sleep 保留的参数名（sender 跳过这些参数、loader 保留其 storage），RL 场景下冻结层（如 embedding/lm_head）免重传；`gpu_worker.py` 的 `_save/_restore_sleep_parameters` 配套。
+- `LLM.sleep(level=1|2)` / `LLM.wake_up()` — sleep mode（`enable_sleep_mode=True` 开启，权重 offload 到 CPU、释放 KV cache，可释放 90%+ 显存，见 `docs/features/sleep_mode.md`）。**v0.30 增量（#57891）**：level-2 sleep 可**保留冻结权重**——`ModelConfig.sleep_preserve_parameter_names`（CLI `--sleep-preserve-parameter-names`）按 glob 指定跨 sleep 保留的参数名（sender 跳过这些参数、loader 保留其 storage），RL 场景下冻结层（如 embedding/lm_head）免重传；`gpu_worker.py` 的 `_save/_restore_sleep_parameters` 配套。**v0.30.1rc0 区间（RL 系列）**：sleep-mode API 的响应与操作指标对齐（#52864，`e5f3d08d72`）；HTTP 权重操作结果与并发跟踪（#55781，`713ec07655`）；RL weight checker（#51350，`42d9f8ccdb`）——RL 训练循环中校验权重更新正确性的引擎侧特性。
 - `LLM.reset_prefix_cache()`、`LLM.start_profile()/stop_profile()`、`LLM.get_metrics()`。
 
 ```python
@@ -64,7 +64,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 - `--headless`：只跑 engine 不跑 API server（多节点 DP 的从节点用）。
 - `--grpc`：改用 gRPC 协议（`VllmEngineServicer`，proto 来自 `smg-grpc-proto`）。
 - `--optimization-level`（`-O0`~`-O3`，默认 O2）：编译/cudagraph 优化档位，见 §5.4。
-- `--performance-mode balanced|interactivity|throughput`（默认 balanced；throughput 会把 `max_num_batched_tokens` 和 `max_num_seqs` 默认值翻倍，`arg_utils.py:1768`，翻倍逻辑在 `_set_default_max_num_seqs_and_batched_tokens_args` `:2932`）。
+- `--performance-mode balanced|interactivity|throughput`（默认 balanced；throughput 会把 `max_num_batched_tokens` 和 `max_num_seqs` 默认值翻倍，`arg_utils.py:1775`，翻倍逻辑在 `_set_default_max_num_seqs_and_batched_tokens_args` `:3040`）。
 
 **Rust frontend（v0.28 新增，实验性）**：`rust/` 目录下的 `vllm-frontend-rs` 是 Python 前端的 Rust 替代实现，用 axum 重建北向 OpenAI 兼容 HTTP 层，仍通过 ZMQ + MessagePack 走既有 engine 边界与 Python engine 进程通信（`rust/README.md`）。分层 crate：`vllm-server`（axum HTTP）→ `vllm-chat`（模板渲染/reasoning/tool 解析）→ `vllm-text`（tokenizer/增量 detokenizer）→ `vllm-llm`（token-in/out facade）→ `vllm-engine-core-client`（ZMQ 传输）。Python 仍负责进程启动，把 Rust API server 作为受管 worker 拉起并传入继承的监听 socket：
 
@@ -72,7 +72,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B
 ```
 
-当前**实验性、功能未对齐** Python 前端，生产环境默认仍用 Python 前端（`VLLM_USE_RUST_FRONTEND` 默认 `0`，`envs.py:166`）。
+当前**实验性、功能未对齐** Python 前端，生产环境默认仍用 Python 前端（`VLLM_USE_RUST_FRONTEND` 默认 `0`，`envs.py:167`）。**v0.30.1rc0 区间**：roundtrip output grammar 经 XGrammar 回放（#59143，`87228cff01`）；MiMo structural-tag builder（#59148，`8039d3cbfd`）。
 
 ### 1.3 Docker 镜像
 <!-- tags: docker, 镜像, target, ipc-host, nonroot -->
@@ -103,7 +103,7 @@ docker run --rm --gpus all \
 ### 1.4 多机 / 大规模部署
 <!-- tags: multi-node, 多机, ray, dp, pd-disaggregation -->
 
-- 单机多卡默认 `mp`（multiprocessing）executor；跨节点用 `--distributed-executor-backend ray`（`ParallelConfig.distributed_executor_backend`，`vllm/config/parallel.py:260`）。
+- 单机多卡默认 `mp`（multiprocessing）executor；跨节点用 `--distributed-executor-backend ray`（`ParallelConfig.distributed_executor_backend`，`vllm/config/parallel.py:261`）。
 - 多节点 mp 后端：`--nnodes N --node-rank R --master-addr IP`。
 - DP（数据并行）：`--data-parallel-size N`，三种 LB 模式（`docs/serving/data_parallel_deployment.md`）：
   - 内部 LB（单入口，默认）；
@@ -124,18 +124,18 @@ docker run --rm --gpus all \
 | `POST /v1/chat/completions` | Chat API（支持流式、tools、reasoning parser） | `entrypoints/openai/chat_completion/api_router.py:41` |
 | `POST /v1/chat/completions/batch` | Chat 批量 | 同上 :83 |
 | `POST /v1/completions` | Completions API（`suffix` 不支持） | `entrypoints/openai/completion/api_router.py:35` |
-| `POST /v1/responses`、`GET /v1/responses/{id}`、`POST /v1/responses/{id}/cancel` | Responses API | `entrypoints/openai/responses/api_router.py` |
+| `POST /v1/responses`、`GET /v1/responses/{id}`、`POST /v1/responses/{id}/cancel` | Responses API（**v0.30.1rc0 区间修复**：流式 final response 从 streamed items 构建 #59307、内置 tool output call ID 保留 #55596、`parallel_tool_calls=false` 尊重 #59298/#50502、reasoning token 按 tool round 计数 #58927、reused prompt token ids 校验 #55771/#59173） | `entrypoints/openai/responses/api_router.py` |
 | `GET /v1/models` | 模型列表 | `entrypoints/openai/models/api_router.py:20` |
 | `POST /v1/embeddings` | Embedding（pooling 模型） | `entrypoints/pooling/embed/api_router.py:28` |
 | `POST /v2/embed`、`/score`、`/v1/score`、`/rerank`、`/v1/rerank`、`/v2/rerank`、`/pooling`、`/classify` | 其他 pooling 任务 | `entrypoints/pooling/*/api_router.py` |
 | `POST /v1/audio/transcriptions`、`/v1/audio/translations` | ASR（Whisper 类模型） | `entrypoints/speech_to_text/*/api_router.py` |
-| `POST /v1/messages`、`/v1/messages/count_tokens` | **Anthropic 兼容** | `entrypoints/anthropic/api_router.py` |
+| `POST /v1/messages`、`/v1/messages/count_tokens` | **Anthropic 兼容**（**v0.30.1rc0 区间**：named tool calls 报告为 tool_use #47598；merged system messages 重复 warning 消除 #59172） | `entrypoints/anthropic/api_router.py` |
 | `POST /cohere/v2/chat` | Cohere 兼容（`VLLM_ENABLE_COHERE_API=1` 开启） | `entrypoints/cohere/api_router.py` |
 | `POST /inference/v1/generate`、`/abort_requests` | vLLM 原生 token-in/token-out 接口；**v0.30 起响应带 `metrics.speculative_decoding`**（per-request 投机解码接受率：`mean_acceptance_length`/`draft_acceptance_rate`/`acceptance_histogram`/`per_step_*`，#43310） | `entrypoints/scale_out/token_in_token_out/api_router.py` |
 | `POST /v1/chat/completions/render`、`/v1/messages/render`、`/v1/completions/render`、`/v1/responses/render` | **scale-out render**（v0.29，把请求渲染成 token 序列，供外部 token-in 服务消费） | `entrypoints/scale_out/render/api_router.py` |
 | `POST /v1/chat/completions/derender`、`/v1/completions/derender` | **scale-out derender**（token 序列还原成响应；v0.30 起流式返回 reasoning + tool calls，#50550） | `entrypoints/scale_out/derender/api_router.py` |
-| `POST /release_kv_cache_memory` | **v0.30 新增**（#44890）：释放 KV cache 显存（sleep 场景），dev 路由 | `entrypoints/serve/dev/sleep/api_router.py:31` |
-| `GET /health`、`/load`、`/version`、`/metrics` | 健康检查/负载/Prometheus | `entrypoints/serve/instrumentator/` |
+| `POST /release_kv_cache_memory` | **v0.30 新增**（#44890）：释放 KV cache 显存（sleep 场景），dev 路由 | `entrypoints/serve/dev/sleep/api_router.py:37` |
+| `GET /health`、`/load`、`/version`、`/metrics` | 健康检查/负载/Prometheus（**v0.30.1rc0 区间**：process manager force kill 时记录子进程终止日志 #52314） | `entrypoints/serve/instrumentator/` |
 | `POST /tokenize`、`/detokenize`、`GET /tokenizer_info` | tokenizer 服务 | `entrypoints/serve/tokenize/api_router.py` |
 | `POST /sleep`、`/wake_up`、`GET /is_sleeping` | sleep mode（`VLLM_SERVER_DEV_MODE=1` 才挂载 dev 路由） | `entrypoints/serve/dev/sleep/api_router.py` |
 | `POST /reset_prefix_cache`、`/reset_mm_cache`、`/reset_encoder_cache` | 缓存管理（dev 模式） | `entrypoints/serve/dev/cache/api_router.py` |
@@ -147,7 +147,7 @@ docker run --rm --gpus all \
 - vLLM 扩展参数通过 `extra_body` 传入，如 `top_k`、`structured_outputs`（JSON schema/regex/EBNF，backend 可选 `xgrammar`/`guidance`/`outlines`/`lm-format-enforcer`，`vllm/config/structured_outputs.py`）、`priority`（配合 `--scheduling-policy priority`）。
 - 已知差异：`/v1/completions` 不支持 `suffix`；chat 的 `user` 字段被忽略；`parallel_tool_calls=false` 保证每请求至多一个 tool call。
 - 默认会应用 HF 仓库里的 `generation_config.json` 覆盖采样默认值，`--generation-config vllm` 可禁用。
-- `--served-model-name` 可改 `/v1/models` 返回的名字（支持列表）；`VLLM_SKIP_MODEL_NAME_VALIDATION=1` 让任意 model 名通过（代理/网关场景）。
+- `--served-model-name` 可改 `/v1/models` 返回的名字（支持列表）；`VLLM_SKIP_MODEL_NAME_VALIDATION=1` 让任意 model 名通过（代理/网关场景）。**v0.30.1rc0 区间**：拒绝与已服务模型同名的 LoRA adapter（#59286，`105a4e097b`）；batched chat completions 的 Harmony `adjust_request` 修复（#58958）+ 非流式每 choice 独立 parser（#58939）+ 从 adjusted requests 采样（#58929）；forced named tool choice 空参数约束为 JSON object（#45290）；Step3p5 forced tool choice 走 XML parser（#51810）。
 - `--enable-request-id-headers` 支持 `X-Request-Id` 透传。
 
 ## 3. 关键环境变量（`vllm/envs.py`）
@@ -217,7 +217,7 @@ docker run --rm --gpus all \
 | `VLLM_USE_FASTOKENS` | `0` | 用 Rust fastokens 替换 HF fast tokenizer（v0.23+，tokenizer 密集负载收益大） |
 | `VLLM_USE_RUST_FRONTEND` | `0` | 用 Rust `vllm-frontend-rs` 替代 Python 前端（v0.28+，实验性，见 §1.2） |
 | `VLLM_USE_V2_MODEL_RUNNER` | 空（自动） | **v0.29**，强制选 Model Runner V2/V1（默认自动：V2 为默认，见 03 §1） |
-| `--enable-scale-out`（CLI flag） | `False` | **v0.30**（#55176）：开启 scale-out render/derender/token-in 端点。取代了 v0.29 的 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（已移除）；`vllm launch render` 专用模式下默认开（`vllm/entrypoints/scale_out/factories.py:72`）。derender 流式语义（客户端携带 `stream_state` 的无状态协议）见 07 §1 与 `docs/serving/online_serving/derenderer.md`（#57922） |
+| `--enable-scale-out`（CLI flag） | `False` | **v0.30**（#55176）：开启 scale-out render/derender/token-in 端点。取代了 v0.29 的 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（已移除）；`vllm launch render` 专用模式下默认开（`vllm/entrypoints/scale_out/factories.py:65`）。derender 流式语义（客户端携带 `stream_state` 的无状态协议）见 07 §1 与 `docs/serving/online_serving/derenderer.md`（#57922） |
 | `aux_output_config`（JSON，`VllmConfig` 字段） | 关闭 | **v0.30 新增**（#45635）：`enable_return_routed_experts`（MoE routed-expert 输出按 KV block hash 持久化到 mmap arena，供外部按 prefix-cache block 读取）+ `max_bytes`（arena 上限，缺省由 worker 按 `num_blocks * hashes_per_kv_block * block_nbytes` 推导）。要求 V2 runner + MoE + prefix caching，拒绝 PP>1/DCP/PCP>1/5 个已知 PD KV connector（Nixl/NixlPull/NixlPush/MoRIIO/Mooncake，#58150）（`config/vllm.py:1092`），见 05 §9.4 |
 | `VLLM_XPU_USE_SAMPLER_KERNEL` | `1` | **v0.30 新增**（#57277）：XPU fused top-k/top-p sampler kernel（不排序 vocab、不物化概率张量；per-request seed/greedy 请求自动回退），见 06 §XPU |
 | `engram_config.dp_shared_memory` | 自动（同机 co-located DP 默认共享） | **v0.30 新增**（#57651）：Engram n-gram 嵌入表 host 内存在同机 DP replica 间共享，见 07 §7.2 |
@@ -225,7 +225,7 @@ docker run --rm --gpus all \
 | ~~`VLLM_PLE_CPU_OFFLOAD`~~ | — | **v0.30 移除**（#57937）：Engram `cpu_offload` 固定默认 True，见 07 §7.2 |
 | `VLLM_LOGGING_LEVEL` | `INFO` | 日志级别 |
 | `VLLM_KV_CACHE_LAYOUT` | 空 | **v0.29 扩展**，KV cache 物理布局：`LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`（`NHD`/`HND` 为兼容旧名，见 02 §5.1） |
-| ~~`VLLM_MM_HASHER_ALGORITHM`~~（无此环境变量） | `blake3` | 多模态内容哈希（FIPS 合规用 sha256/sha512）——实为 `MultiModalConfig.mm_hasher_algorithm`（`vllm/config/multimodal.py:192`）/ CLI `--mm-hasher-algorithm`（`arg_utils.py:1415`） |
+| ~~`VLLM_MM_HASHER_ALGORITHM`~~（无此环境变量） | `blake3` | 多模态内容哈希（FIPS 合规用 sha256/sha512）——实为 `MultiModalConfig.mm_hasher_algorithm`（`vllm/config/multimodal.py:372`）/ CLI `--mm-hasher-algorithm`（`arg_utils.py:1418`） |
 | `VLLM_IMAGE_FETCH_TIMEOUT` / `VLLM_MAX_IMAGE_PIXELS` | `5` / ~179M | 多模态媒体抓取/解压炸弹防护 |
 | `VLLM_MAX_MEDIA_DOWNLOAD_SIZE_MB` | `256` | **v0.29**，多模态媒体下载大小上限（MB） |
 | `VLLM_MAX_EMBED_DECODE_BYTES` | `2 GiB` | **v0.29**，embedding 解码字节上限（防 128K-token float32 等膨胀） |
@@ -243,7 +243,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 - `max_num_batched_tokens`：单个 engine 迭代最多处理的 token 数（prefill+decode 合计预算）。
 - `max_num_seqs`：单迭代最多并发的序列数。
 
-默认值按硬件自动选择（`EngineArgs.get_batch_defaults`，`vllm/engine/arg_utils.py:2729`）：
+默认值按硬件自动选择（`EngineArgs.get_batch_defaults`，`vllm/engine/arg_utils.py:2837`）：
 
 | GPU | LLM 类 | API server |
 |---|---|---|
@@ -263,7 +263,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 <!-- tags: memory, 显存, gpu-memory-utilization, kv-cache, 量化 -->
 
 - `--gpu-memory-utilization`（`CacheConfig.gpu_memory_utilization`，默认 **0.92**，`vllm/config/cache.py:103`）：vLLM 实例占用的显存比例（权重+激活+KV cache）。OOM 时调低，吞吐不够时调高。
-- `--kv-cache-memory-bytes`：直接指定每 GPU KV cache 字节数，**设置后忽略 gpu_memory_utilization**，更精细。启动日志会打印建议值（`vllm/v1/worker/gpu_worker.py:870-891`），回灌可跳过 memory profiling 加速启动（文档中写作 `--kv-cache-memory`，代码中 flag 为 `--kv-cache-memory-bytes`）。
+- `--kv-cache-memory-bytes`：直接指定每 GPU KV cache 字节数，**设置后忽略 gpu_memory_utilization**，更精细。启动日志会打印建议值（`vllm/v1/worker/gpu_worker.py:730-747`），回灌可跳过 memory profiling 加速启动（文档中写作 `--kv-cache-memory`，代码中 flag 为 `--kv-cache-memory-bytes`）。
 - `--kv-cache-dtype`（`CacheConfig.cache_dtype`）：`auto`/`fp8`/`fp8_e4m3`/`fp8_e5m2`/`nvfp4`/`turboquant_*`/`int8_per_token_head` 等。**FP8 KV cache 使 KV 显存减半、并发翻倍**，精度损失通常可接受（H100/H200/B 系列支持）。
 - 量化权重：`--quantization` 支持 `awq`/`gptq`/`gptq_marlin`/`awq_marlin`/`fp8`/`modelopt`/`modelopt_fp4`/`mxfp8`/`nvfp4`/`compressed-tensors`/`torchao` 等（`vllm/model_executor/layers/quantization/__init__.py:15`，`QuantizationMethods`）。HF 上直接下量化好的 checkpoint 即可（如 RedHatAI 的 FP8 模型）；在线量化用 `fp8_per_tensor`/`fp8_per_block` 等 shorthand。
 - `--max-model-len`：限制上下文长度直接省 KV cache（长上下文是 KV 显存大头）。
@@ -283,7 +283,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.4 并行策略选择（TP/PP/DP/EP）
 <!-- tags: parallel, 并行策略, tp, pp, dp -->
 
-`ParallelConfig`（`vllm/config/parallel.py:124`）字段：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`prefill_context_parallel_size`、`enable_expert_parallel`、`all2all_backend` 等。
+`ParallelConfig`（`vllm/config/parallel.py:125`）字段：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`prefill_context_parallel_size`、`enable_expert_parallel`、`all2all_backend` 等。
 
 决策规则（`docs/serving/parallelism_scaling.md`）：
 
@@ -302,7 +302,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 
 - `--enforce-eager`：完全禁用 torch.compile 和 cudagraph。启动最快、显存最省，但 decode 性能明显下降。**只在调试/测启动时间/显存紧张时用**。**v0.30.1rc0 区间**：`enforce_eager` 现在还会把 `kernel_config.enable_jit_warmup` 置 False（#58197，`config/vllm.py:1619-1628`），eager 模式不再做 JIT warmup（#55146 门控），进一步缩短启动时间。
 - 默认（`-O2`）：`CompilationMode.VLLM_COMPILE`（Inductor 后端 + piecewise 编译 + 自定义 pass）+ `CUDAGraphMode.FULL_AND_PIECEWISE`（`vllm/config/compilation.py:53`）。cudagraph 消除 decode 的 kernel launch 开销，小 batch 收益最大。
-- `-O0`~`-O3`（`VllmConfig.optimization_level`，默认 O2，`vllm/config/vllm.py:439`）：O0 无优化最快启动；O1 Dynamo+Inductor+PIECEWISE cudagraph；O2 加 FULL_AND_PIECEWISE；O3 目前等同 O2。
+- `-O0`~`-O3`（`VllmConfig.optimization_level`，默认 O2，`vllm/config/vllm.py:442`）：O0 无优化最快启动；O1 Dynamo+Inductor+PIECEWISE cudagraph；O2 加 FULL_AND_PIECEWISE；O3 目前等同 O2。
 - `--compilation-config`（或 `-cc.mode=3`、`-cc.cudagraph_capture_sizes=[1,2,4,8]`）：精细控制。`cudagraph_capture_sizes` 默认到 `max_num_seqs`；显存不够时截断（如 `[1,2,4,8,16]`）。
 - `--performance-mode interactivity`：小 batch 细粒度 capture（1..32 每个都抓），padding 开销最小，延迟最优。
 - 编译缓存：`VLLM_CACHE_ROOT/torch_compile_cache`，跨容器/机器可拷贝；任何模型/配置/相关 `VLLM_*` 环境变量/硬件变化都会使缓存失效（`envs.py:compile_factors()`）。
@@ -359,7 +359,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 ### 4.9 Profiling（torch / CUDA / Proton）
 <!-- tags: profiling, torch-profiler, proton, profile, 性能分析, 火焰图 -->
 
-`ProfilerConfig`（`vllm/config/profiler.py:40`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1764`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:21`）或离线 `LLM.start_profile()/stop_profile()`。
+`ProfilerConfig`（`vllm/config/profiler.py:40`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1842`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:21`）或离线 `LLM.start_profile()/stop_profile()`。
 
 - **架构（v0.30.0rc2 统一后）**：profiler 创建/分发收敛在 `vllm/profiler/wrapper.py` 的工厂 `create_worker_profiler`（:675），各 worker（`gpu_worker.py:1323` 等）在 `profile()` 时懒创建 wrapper；平台差异（CUDA/XPU/CPU activity 映射）由 wrapper 内部按 `current_platform` 处理，worker 侧不再各自实现（#57460，此前 `cpu_worker.py`/`xpu_worker.py` 各有一份重复代码）。
 - **`torch_profiler_activities`**（`config/profiler.py:55`）：worker 侧 torch profiler 记录的 activity 列表（`CPU`/`CUDA`/`PrivateUse1`/`XPU`）；缺省时按平台默认（GPU=CPU+CUDA，XPU=CPU+XPU，CPU=CPU）。`delay_iterations`/`max_iterations` + `ignore_frontend=False` 且记录 CPU 时会告警高开销（`config/profiler.py:180` 校验）。
@@ -391,7 +391,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 ## 6. Benchmark 工具
 <!-- tags: benchmark, bench, 压测, 评测 -->
 
-`benchmarks/` 目录下的旧脚本（`benchmark_serving.py` 等）已废弃，统一用 CLI（`vllm/entrypoints/cli/benchmark/`，实现委托 `vllm/benchmarks/`）：
+`benchmarks/` 目录下的旧脚本（`benchmark_serving.py` 等）已废弃，统一用 CLI（`vllm/entrypoints/cli/benchmark/`，实现委托 `vllm/benchmarks/`）。**v0.30.1rc0 区间**：sweep 压测新增 warmup 与失败恢复（#57305，`1b77cc3d67`）：
 
 ```bash
 # 在线压测（最常用）：吞吐 + TTFT/TPOT/ITL

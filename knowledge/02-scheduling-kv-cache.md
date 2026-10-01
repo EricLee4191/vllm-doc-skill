@@ -1,6 +1,6 @@
 # 调度器与 KV Cache 管理
 
-> 基于 vLLM main（`924707f1bf`，2026-09-27），最新 tag **v0.30.1rc0**（`153242a314`，2026-09-23，release candidate，HEAD 领先 222 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构为默认且唯一的引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 总体架构
 <!-- tags: scheduler, overview, 调度器 -->
@@ -20,7 +20,7 @@ Scheduler (vllm/v1/core/sched/scheduler.py)
       └── BlockPool (block_pool.py)             # 物理块池 + 前缀缓存哈希表
 ```
 
-- `KVCacheConfig`（`vllm/v1/kv_cache_interface.py:1431`）：`num_blocks`（物理块数）、`kv_cache_tensors`（worker 如何初始化张量）、`kv_cache_groups`（`KVCacheGroupSpec` 列表，每组共享一张 block table）。
+- `KVCacheConfig`（`vllm/v1/kv_cache_interface.py:1440`）：`num_blocks`（物理块数）、`kv_cache_tensors`（worker 如何初始化张量）、`kv_cache_groups`（`KVCacheGroupSpec` 列表，每组共享一张 block table）。
 - 调度器通过 `SchedulerConfig.get_scheduler_cls()`（`vllm/config/scheduler.py:220`）选择 `Scheduler` 或 `AsyncScheduler`（`v1/core/sched/async_scheduler.py`）；`scheduler_cls` 字段可替换为自定义类。
 
 ## 2. Scheduler 调度算法
@@ -36,7 +36,7 @@ Scheduler (vllm/v1/core/sched/scheduler.py)
 每步流程（`scheduler.py:557-1490`）：
 
 1. **先调度 running 队列**：遍历 `self.running`，对每个请求计算 `num_new_tokens = num_tokens_with_spec + num_output_placeholders - num_computed_tokens`，受 `token_budget`（= `max_num_scheduled_tokens`）与 `input_budget`（= `max_num_batched_tokens`）约束。
-2. **再调度 waiting 队列**：在 token budget 有余量、且 `len(running) < max_num_seqs` 时，从 `waiting`/`skipped_waiting` 队列按策略取请求，做前缀缓存查找 + `allocate_slots()` 后加入 `running`。
+2. **再调度 waiting 队列**：在 token budget 有余量、且 `len(running) < max_num_seqs` 时，从 `waiting`/`kv_holding_waiting` 队列按策略取请求，做前缀缓存查找 + `allocate_slots()` 后加入 `running`。
 3. 产出 `SchedulerOutput`（`v1/core/sched/output.py`）：`scheduled_new_reqs`（`NewRequestData`，含 `block_ids`）、`scheduled_cached_reqs`（`CachedRequestData`，增量更新）、`num_scheduled_tokens`、`num_common_prefix_blocks`（cascade attention 用）等。
 
 **continuous batching** 即由此实现：每步（每次 forward）都重新组 batch，prefill 与 decode 请求**混合在同一 batch 中**（prefill 以 chunk 形式与 decode token 混排，即 prefill/decode 混合调度）。
@@ -44,19 +44,21 @@ Scheduler (vllm/v1/core/sched/scheduler.py)
 ### 2.2 队列与策略
 <!-- tags: scheduler, queues, fcfs, priority, async-scheduler -->
 
-- `self.waiting` / `self.running` / `self.skipped_waiting`（`scheduler.py:209-212`）：
+- `self.waiting` / `self.running` / `self.kv_holding_waiting` / `self.deferred_waiting`（`scheduler.py:212-219`）：
   - `waiting`：新请求与抢占回来的请求（`prepend_request` 插到队首）。
-  - `skipped_waiting`：本步因约束（LoRA 上限、encoder budget、KV connector 异步加载等）被跳过的请求，步末重新 prepend 回队首（`scheduler.py:1328`）。
+  - `kv_holding_waiting`（**v0.30.1rc0 区间重构，#58947**，替代旧 `skipped_waiting` 队列）：本步被跳过但**仍持有 KV 块**的请求（KV connector 异步加载等）。调度扫描**总是先排空该队列再取 `waiting`**（`scheduler.py:887` `request_queue = self.kv_holding_waiting or self.waiting`）——持有块的请求绝不允许排在"分配失败即终止扫描"的请求之后，步末按跳过原因分别 prepend 回 `kv_holding_waiting`/`waiting` 队首（`scheduler.py:1344-1345`）。
+  - `deferred_waiting`（set，同 #58947）：被调度扫描跳过或处于阻塞状态入队的请求集合（LoRA 上限、encoder budget 等），用于 `prefill_capacity_bound` 判定（`scheduler.py:1352`）与 abort 时清理；`num_skipped_waiting_reqs` 指标现取自 `len(deferred_waiting)`（`scheduler.py:2879-2882`）。
   - 队列实现见 `v1/core/sched/request_queue.py`：`FCFSRequestQueue`（deque）与 `PriorityRequestQueue`（heapq，按 `(priority, arrival_time)` 排序，priority 数值小优先）。策略由 `SchedulerConfig.policy`（`"fcfs"` / `"priority"`）决定。
 - `RequestStatus`（`v1/request.py:366`）：`WAITING` → `RUNNING` → `FINISHED_*`；另有 `PREEMPTED`、`WAITING_FOR_REMOTE_KVS`（KV connector 异步加载）、`WAITING_FOR_STREAMING_REQ`、`WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR`。
 - **AsyncScheduler**（`async_scheduler.py`）：在 `_update_after_schedule` 中为 decode 请求预置 `num_output_placeholders`（1 个采样 token + spec tokens），使调度器可以在上一步 GPU 还在执行时就调度下一步，消除调度-执行重叠；`_update_request_with_output` 中提前 `cache_blocks` 新 token。由 `SchedulerConfig.async_scheduling` 控制（默认开启，`SchedulerConfig.get_scheduler_cls` 据此选类）。
 - **队列上限（v0.29 新增）**：`SchedulerConfig.max_num_queued_reqs`（`config/scheduler.py:84`）与 `max_num_queued_tokens`（:87），CLI `--max-num-queued-reqs` / `--max-num-queued-tokens`。与 `max_num_seqs`（每 DP rank 的 running 上限）不同，这两个限制的是 **waiting 队列**深度，且在 API 层强制（防止队列无限增长导致内存/延迟失控）。多 API server 进程部署下，队列计数通过 `SharedAdmissionStats`（`vllm/v1/engine/admission_control.py:13`）跨进程共享（每进程独占一个 cache-line 槽位，无锁聚合），避免各进程各自计数导致总队列超限。DP 部署下总并发上限 ≈ `data_parallel_size * max_num_seqs` + 期望队列深度。
-- **RUNNING 准入上限（v0.30 新增，#56758）**：`SchedulerConfig.max_num_active_seqs`（`config/scheduler.py:70`，CLI `--max-num-active-seqs`）。与 `max_num_seqs`（决定 model runner 的 per-request buffer / CUDA graph 容量）解耦：只限制**可进入 RUNNING 的请求数**（`scheduler.py:127-131` `max_num_active_reqs`，默认回落到 `max_num_seqs`），使 decode batch 更小而不缩小 runner/graph 容量，须 `<= max_num_seqs`。在 waiting 调度循环中强制：`num_running >= max_num_active_reqs` 时停止准入（`scheduler.py:878-879`）。
+- **RUNNING 准入上限（v0.30 新增，#56758）**：`SchedulerConfig.max_num_active_seqs`（`config/scheduler.py:70`，CLI `--max-num-active-seqs`）。与 `max_num_seqs`（决定 model runner 的 per-request buffer / CUDA graph 容量）解耦：只限制**可进入 RUNNING 的请求数**（`scheduler.py:127-131` `max_num_active_reqs`，默认回落到 `max_num_seqs`），使 decode batch 更小而不缩小 runner/graph 容量，须 `<= max_num_seqs`。在 waiting 调度循环中强制：`num_running >= max_num_active_reqs` 时停止准入（`scheduler.py:893-894`；暂停中的流式会话 `WAITING_FOR_STREAMING_REQ` 虽不在 `running` 但占 runner slot，一并计入 `num_running`）。
+- **v0.30.1rc0 区间修复**：streaming continuation 的 `max_tokens` 刷新（#57676）与 logprobs 跨 continuation 保留（#57447）；resumable 请求 + async scheduling 的 handoff 竞态修复（#58259）；AuxOutput 在 abort 且无 running 请求后可 reset（#59060）；**fixed-token prefill scoring**（#54335，`b721a4c709`）——新增按固定 token 数做 prefill 评分的调度特性（embedding/scoring 场景）。
 
 ### 2.3 Chunked prefill
 <!-- tags: chunked-prefill, 分块, watermark, 准入, throttle -->
 
-- `SchedulerConfig.enable_chunked_prefill` 默认 `True`（`vllm/config/scheduler.py:126`）。chunk 大小由剩余 `max_num_batched_tokens` 决定；`long_prefill_token_threshold`（默认 0=不限，`config/scheduler.py:80`）可给单个请求的 prefill chunk 设上限（`scheduler.py:662-663`、`1102-1103`）。**v0.30 软化（#57951）**：该上限只在 batch 中还有其他请求（`running + waiting + skipped_waiting > 1`）时生效（`scheduler.py:602-609` 计算局部 `long_prefill_token_threshold`）——唯一请求时置 0 不截断（无人可被饿死，让它用满 token 预算）。
+- `SchedulerConfig.enable_chunked_prefill` 默认 `True`（`vllm/config/scheduler.py:126`）。chunk 大小由剩余 `max_num_batched_tokens` 决定；`long_prefill_token_threshold`（默认 0=不限，`config/scheduler.py:80`）可给单个请求的 prefill chunk 设上限（`scheduler.py:650-663`、`1102-1103`）。**v0.30 软化（#57951）**：该上限只在 batch 中还有其他请求（`num_running + num_waiting > 1`，`get_request_counts` 含 `kv_holding_waiting`）时生效（`scheduler.py:611-625` 计算局部 `long_prefill_token_threshold`）——唯一请求时置 0 不截断（无人可被饿死，让它用满 token 预算）。
 - `scheduler_reserve_full_isl`（默认 `True`，`config/scheduler.py:191`）：准入时检查**整条序列**（而非首个 chunk）能否装下，防止 chunked prefill 过度准入导致 thrashing；对应 `allocate_slots(full_sequence_must_fit=...)`。
 - `watermark`（默认 0.0，`config/scheduler.py:188`）：准入 waiting/preempted 请求时额外要求 `watermark * num_blocks` 的空闲块余量，避免频繁抢占。在 `KVCacheManager.allocate_slots` 中实现（`kv_cache_manager.py:506-529`，仅对 WAITING/PREEMPTED 且已有请求被调度时生效）。
 - DP 部署的 prefill 节流：`prefill_schedule_interval` + `schedule(throttle_prefills=...)`，非对齐步只跑 decode、把 prefill chunk 推迟（`scheduler.py:601-602` 附近）。
@@ -64,7 +66,7 @@ Scheduler (vllm/v1/core/sched/scheduler.py)
 ### 2.4 抢占（preemption）：recompute，无 swap
 <!-- tags: preemption, recompute, 抢占, 无swap, 释放 -->
 
-v1 只有 **recompute**，没有 v0 的 swap（CPU 换出）。`_preempt_request()`（`scheduler.py:1520`）：
+v1 只有 **recompute**，没有 v0 的 swap（CPU 换出）。`_preempt_request()`（`scheduler.py:1521`）：
 
 - 释放该请求全部 KV 块（`_free_request_blocks` → `kv_cache_manager.free`，带 hash 的块进入 LRU 可驱逐区，可被前缀缓存复用）；
 - `request.num_computed_tokens = 0`，状态置 `PREEMPTED`，`num_preemptions += 1`，`waiting.prepend_request(request)` 放回队首；
@@ -75,8 +77,8 @@ v1 只有 **recompute**，没有 v0 的 swap（CPU 换出）。`_preempt_request
 ### 2.5 完成与释放
 <!-- tags: update-from-output, 完成, 释放, spec-rollback, defer-free -->
 
-- `update_from_output()`（`scheduler.py:1900`）：处理采样结果、spec token 拒绝回滚（`num_computed_tokens -= num_rejected`，`scheduler.py:1997`）、停止条件（`check_stop`）、`_free_request`（`scheduler.py:2559`）释放块。KV connector 场景下可延迟释放（`defer_block_free`，`deferred_frees` FIFO 按 step 序号 fence，`scheduler.py:388`）。
-- **AuxOutput connector 集成**（#45635）：`aux_output_config.enabled` 时 scheduler 持有 `AuxOutputSchedulerConnector`（`scheduler.py:394-396`）；每步把 `aux_output_connector_metadata`（含按请求打包的 KV block hash）附到 `SchedulerOutput`（`scheduler.py:1475-1477`）；`update_from_output` 中按请求取回 routed-expert 输出（`take_output`，`scheduler.py:2074-2076`）；请求结束/重置时释放引用（`scheduler.py:1536-1537`、`2564-2565`）。存储与发布细节见 05 §9.4。
+- `update_from_output()`（`scheduler.py:1902`）：处理采样结果、spec token 拒绝回滚（`num_computed_tokens -= num_rejected`，`scheduler.py:1999`）、停止条件（`check_stop`）、`_free_request`（`scheduler.py:2560`）释放块。KV connector 场景下可延迟释放（`defer_block_free`，`deferred_frees` FIFO 按 step 序号 fence，`scheduler.py:388`）。
+- **AuxOutput connector 集成**（#45635）：`aux_output_config.enabled` 时 scheduler 持有 `AuxOutputSchedulerConnector`（`scheduler.py:394-396`）；每步把 `aux_output_connector_metadata`（含按请求打包的 KV block hash）附到 `SchedulerOutput`（`scheduler.py:1476-1477`）；`update_from_output` 中按请求取回 routed-expert 输出（`take_output`，`scheduler.py:2075-2076`）；请求结束/重置时释放引用（`scheduler.py:1537-1537`、`2564-2565`）。存储与发布细节见 05 §9.4。
 
 ## 3. KV Cache 的 block 抽象
 <!-- tags: kv-cache, block, blockpool, prefix-caching, apc, 前缀缓存 -->
@@ -135,8 +137,8 @@ v1 只有 **recompute**，没有 v0 的 swap（CPU 换出）。`_preempt_request
 - **命中**：请求首次调度时 `KVCacheManager.get_computed_blocks()`（`kv_cache_manager.py:264`）→ `coordinator.find_longest_cache_hit(request.block_hashes, max_cache_hit_length)`，`max_cache_hit_length = num_tokens - 1`（最后一个 token 必须重算以取 logits）。命中的块 `touch()` 后并入请求 block table，`num_computed_tokens` 直接跳到命中长度，跳过对应 prefill 计算。
 - **写入**：`allocate_slots` 末尾与 `update_from_output`（异步调度路径）中 `cache_blocks()`，把新满块经 `BlockPool.cache_full_blocks()`（`block_pool.py:224`）插入哈希表。
 - **驱逐**：LRU——空闲且有 hash 的块留在 free queue 尾部，分配新块时从队首驱逐（`_maybe_evict_cached_block`，`block_pool.py:723`）。
-- **粒度**：`hash_block_size`（= `CacheConfig.prefix_match_unit`）可细于物理块（如 32 vs 1024），由 `resolve_kv_cache_block_sizes()`（`kv_cache_utils.py:731`）解析：单 group 时 = `block_size * dcp`；多 group 时 = `prefix_match_unit` 或各组 block size 的 GCD。细粒度 partial 命中（`enable_partial_hash_hits`）主要服务 Mamba "align" 模式。
-- **重置**：`Scheduler.reset_prefix_cache()`（`scheduler.py:2688`）→ `BlockPool.reset_prefix_cache()`（`block_pool.py:821`），RLHF 权重更新后失效缓存用；`reset_running_requests=True` 时先抢占所有 running 请求。
+- **粒度**：`hash_block_size`（= `CacheConfig.prefix_match_unit`）可细于物理块（如 32 vs 1024），由 `resolve_kv_cache_block_sizes()`（`kv_cache_utils.py:731`）解析：单 group 时 = `block_size * dcp`；多 group 时 = `prefix_match_unit` 或各组 block size 的 GCD。细粒度 partial 命中（`enable_partial_hash_hits`）主要服务 Mamba "align" 模式。**v0.30.1rc0 区间**：prefix-cache 的 `extra_keys` 按来源打标签（#51899，`765872e7ed`）；单个 KV cache group 无法满足的 `prefix_match_unit` 被拒绝（#58021，`be255076d0`）；Mamba prompt-end prefill checkpoint 在 sparse retention 下保留（#59146，`d882bddbea`）。
+- **重置**：`Scheduler.reset_prefix_cache()`（`scheduler.py:2689`）→ `BlockPool.reset_prefix_cache()`（`block_pool.py:821`），RLHF 权重更新后失效缓存用；`reset_running_requests=True` 时先抢占所有 running 请求。
 - **统计**：`PrefixCacheStats`（`v1/metrics/stats.py`），`--log-stats` 时记录 query/hit token 数，暴露为 Prometheus 指标。
 - **KV hints（v0.30 新增，#53423）**：`vllm/v1/kv_hints/protocol.py` 定义 `KvHintsEnvelope`/`KvHintAction`（msgspec frozen struct，版本化 action：`action_id` 等）——orchestrator 侧对单个请求的**可编程 KV 管理提示**（如 KVCR 的 router hint）。传递链：`AsyncLLM.add_request(kv_hints=...)` → `InputProcessor` → `EngineCoreRequest`/`Request.kv_hints` → `ReqContext.kv_hints`（`kv_offload/base.py`），KV offload tiering 各层在 `on_new_request` 解析一次后缓存到 `_state`。
 
@@ -145,7 +147,7 @@ v1 只有 **recompute**，没有 v0 的 swap（CPU 换出）。`_preempt_request
 
 启动时三步（`v1/worker/gpu_worker.py` + `v1/core/kv_cache_utils.py`）：
 
-1. **可用显存**：`GPUWorker.determine_available_memory()`（`gpu_worker.py:532`）
+1. **可用显存**：`GPUWorker.determine_available_memory()`（`gpu_worker.py:598`）
    - 若设了 `kv_cache_memory_bytes`，直接用它（忽略 `gpu_memory_utilization`）；
    - 否则跑一次 `profile_run()`（dummy forward，按 `max_num_batched_tokens` 编译/捕获 CUDA graph），`available = requested_memory - non_kv_cache_memory - cudagraph_memory_estimate`（`VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS`，v0.21+ 默认开）。
    - `requested_memory = total_gpu_memory * gpu_memory_utilization`（默认 **0.92**）。
@@ -155,7 +157,7 @@ v1 只有 **recompute**，没有 v0 的 swap（CPU 换出）。`_preempt_request
    - 各 rank 取 `min(num_blocks)` 对齐（`kv_cache_utils.py:2761`）。
 3. **容量报告**：`update_kv_cache_capacity()`（`kv_cache_utils.py:2395`）计算 `kv_cache_size_tokens = max_concurrency * max_model_len`（group-aware，`get_max_concurrency_for_kv_cache_config`，`kv_cache_utils.py:1077`），启动日志打印 "GPU KV cache size: N tokens, Maximum concurrency for M tokens per request: X.XXx"。
 
-**page_size**：`AttentionSpec.page_size_bytes = num_heads * storage_block_size * (head_size + head_size_v) * dtype_size`（`kv_cache_interface.py:516`），受 `cache_dtype`（fp8 等量化会缩小 page size，`KVQuantMode`）；`block_size` 默认 **16**（`CacheConfig.DEFAULT_BLOCK_SIZE`，`vllm/config/cache.py:71`）。
+**page_size**：`AttentionSpec.page_size_bytes = num_heads * storage_block_size * (head_size + head_size_v) * dtype_size`（`kv_cache_interface.py:519`），受 `cache_dtype`（fp8 等量化会缩小 page size，`KVQuantMode`）；`block_size` 默认 **16**（`CacheConfig.DEFAULT_BLOCK_SIZE`，`vllm/config/cache.py:71`）。
 
 ## 5. KVCacheSpec 体系与注册
 <!-- tags: kv-cache, spec, mamba, sliding-window, hybrid -->
@@ -188,7 +190,7 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 | `BLHNC` / `BLNHC` / `BHLNC` | `B` 最外 | block-outermost（block 连续） |
 | `NHD` / `HND` | — | 旧名兼容（`NHD`≈`LBHNC`、`HND`≈`LBNHC`） |
 
-- 由 `VLLM_KV_CACHE_LAYOUT` 选择（`vllm/envs.py:1816`，取值 `LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`，默认 `None` 走平台/模型默认）。
+- 由 `VLLM_KV_CACHE_LAYOUT` 选择（`vllm/envs.py:1855`，取值 `LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`，默认 `None` 走平台/模型默认）。
 - 关键属性：`is_layer_compact`（L 最外）、`is_block_contiguous`（`[H,N,C]` 块内连续）、`is_block_compact`（每页字节连续）、`is_block_outermost`（B 最外）——backend 的 `validate_configuration` 与 kernel 据此判断能否实现。
 - `compute_layout_strides()` / `create_kv_cache_views()`（`kv_cache_interface.py`）按布局算 stride 并生成 per-layer 视图；`group_kernel_blocks()` 处理 kernel block 与物理 block 不一致的情况。
 - 动机：不同 attention backend（尤其 MLA sparse、HiSparse、DCP）对 KV 的物理排列要求不同，统一成枚举后 backend 只需声明所需布局，避免各处硬编码 `NHD/HND`。
@@ -201,10 +203,10 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 ### 6.1 原生 offloading（`vllm/v1/kv_offload/`，默认 backend）
 <!-- tags: kv-offload, native, offloading, tiering, cpu -->
 
-- 配置：`CacheConfig.kv_offloading_size`（GiB，None=关闭）+ `kv_offloading_backend`（`"native"` 默认 / `"lmcache"`）。`VllmConfig._post_init_kv_transfer_config()`（`vllm/config/vllm.py:1147`）把它翻译成 KV connector：native → `OffloadingConnector`（或 `VLLM_USE_SIMPLE_KV_OFFLOAD=1 时 → `SimpleCPUOffloadConnector`），`kv_role="kv_both"`，`cpu_bytes_to_use = size GiB`。
+- 配置：`CacheConfig.kv_offloading_size`（GiB，None=关闭）+ `kv_offloading_backend`（`"native"` 默认 / `"lmcache"`）。`VllmConfig._post_init_kv_transfer_config()`（`vllm/config/vllm.py:1124`）把它翻译成 KV connector：native → `OffloadingConnector`（或 `VLLM_USE_SIMPLE_KV_OFFLOAD=1 时 → `SimpleCPUOffloadConnector`），`kv_role="kv_both"`，`cpu_bytes_to_use = size GiB`。
 - 抽象（`kv_offload/base.py`）：`OffloadingManager`（:220）：`lookup/prepare_load/prepare_store/complete_store/complete_load/on_new_request/on_request_finished`；`OffloadKey = block_hash + group_idx`（:26）；`Medium`（CPU/STORAGE）、`Locality`（LOCAL/REMOTE）、`TierFilter` 支持分层；`OffloadPolicy`（BLOCK_LEVEL：只 offload 新算块 / 全量）。
 - 后端注册（`kv_offload/factory.py`）：`CPUOffloadingSpec`（`kv_offload/cpu/`，含 `policies/lru.py`、`policies/arc.py` 驱逐策略、`swap_blocks_triton.py`）与 `TieringOffloadingSpec`（`kv_offload/tiering/`，多级：`fs/` 文件系统、`obj/` 对象存储、`p2p/` 实例间）。
-- 语义：GPU 块被 LRU 驱逐前/后被异步写到 CPU（或更低层），后续请求的 prefix 查找可命中 offload 层并异步 load 回 GPU（请求进入 `WAITING_FOR_REMOTE_KVS`，`scheduler.py:1248`）。这是 v1 中"swap"语义的正式实现。
+- 语义：GPU 块被 LRU 驱逐前/后被异步写到 CPU（或更低层），后续请求的 prefix 查找可命中 offload 层并异步 load 回 GPU（请求进入 `WAITING_FOR_REMOTE_KVS`，`scheduler.py:1249`）。这是 v1 中"swap"语义的正式实现。
 - **v0.30 增强**：
   - **背压检测与处置**（#50045，`kv_offload/tiering/backpressure.py`）：store 侧积压时按 EMA 延迟指标（`vllm:kv_offload_tiering_backpressure_store_latency_ema`）丢弃部分 store（`_stores_dropped`/`_blocks_dropped` 指标），防止 offload 队列无限增长拖慢 GPU。
   - **KVCR 二级 tier 适配器**（#53624，`kv_offload/tiering/kvcr/`）：把 KVCR 作为 tiering 的二级存储接入。
@@ -226,7 +228,7 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 
 `vllm/v1/hisparse/`（`coordinator.py`/`runtime.py`/`layout.py`/`block_pool.py`）：把 sparse-MLA 的 KV **常驻 host 内存**，decode 时只把"热"页缓冲到 GPU（hot-buffering），大幅降低长上下文 MLA 模型的 GPU KV 占用。配套 `HiSparseHotSpec`/`HiSparseResidentSpec`/`HiSparseSourceSpec`（`single_type_kv_cache_manager.py` 的 `HiSparseHotManager` 等）与 KV connector `vllm/distributed/kv_transfer/kv_connector/v1/hisparse/`。
 
-- 配置：`AttentionConfig.hisparse_config`（`vllm/config/attention.py:98`，`HiSparseConfig`，:18）。
+- 配置：`AttentionConfig.hisparse_config`（`vllm/config/attention.py:101`，`HiSparseConfig`，:18）。
 - **强制 Model Runner V2**（`use_v2_model_runner` 检测到此配置时若 `VLLM_USE_V2_MODEL_RUNNER=0` 直接报错，`vllm/config/vllm.py:701-708`）。
 - 与 6.1/6.2 的区别：不是通用 KV 换出，而是面向 sparse-MLA（DeepSeek 系 + indexer top-k）的 host-resident 专用路径。
 
@@ -259,9 +261,9 @@ v0.29 把 KV cache 的物理内存布局抽象成独立枚举 `KVCacheLayout`（
 | `enable_mamba_shared_prefix_checkpoint`（CLI `--enable-mamba-shared-prefix-checkpoint`） | `CacheConfig:187` | **v0.30 更名**（原 `--enable-mamba-fine-grained-prefix-cache`，#57382）：在 EAGLE/MTP 兄弟请求 resume 的共享前缀 junction 处也注册 Mamba "align" checkpoint（默认只在 prompt 尾部），仅对 `mamba_cache_mode=align` 生效 |
 | `kv_offloading_size` / `kv_offloading_backend` | `CacheConfig:210-219` | KV offload 容量(GiB) / native|lmcache |
 | `disable_hybrid_kv_cache_manager` | `SchedulerConfig:122` | 混合模型按 full attention 统一分配 |
-| `VLLM_USE_SIMPLE_KV_OFFLOAD` | `envs.py:2158` | native offload 走 simple connector |
+| `VLLM_USE_SIMPLE_KV_OFFLOAD` | `envs.py:2164` | native offload 走 simple connector |
 | `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` | env | 是否把 cudagraph 显存计入 profile（默认开） |
-| `VLLM_KV_CACHE_LAYOUT` | `envs.py:1816` | **v0.29 扩展**，KV 物理布局（`LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`），见 §5.1 |
+| `VLLM_KV_CACHE_LAYOUT` | `envs.py:1855` | **v0.29 扩展**，KV 物理布局（`LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`），见 §5.1 |
 
 **调优要点**：
 - 吞吐：调大 `max_num_batched_tokens`（受显存/延迟权衡）；`max_num_seqs` 影响 batch 宽度。
