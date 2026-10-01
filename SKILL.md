@@ -53,7 +53,7 @@ grep -n "tags:.*kv-cache.*capacity\|tags:.*显存" knowledge/*.md
 
 ## 注意事项
 
-- 知识库基于 vLLM main（`df8fd42116`，2026-10-01）/ 最新 tag v0.31.0rc2（2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）源码整理。vLLM 迭代很快，回答"当前版本是否如此"类问题时以源码为准。
+- 知识库基于 vLLM main（`df8fd42116`，2026-10-01）/ 最新 tag v0.31.0rc2（`7a7283a0a2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）源码整理。vLLM 迭代很快，回答"当前版本是否如此"类问题时以源码为准。
 - 配置项名称以源码 `vllm/config/` 与 `vllm/envs.py` 为准，不要凭记忆猜测参数名。
 - 给部署建议时，优先给保守可运行的基线配置，再给进阶优化项。
 
