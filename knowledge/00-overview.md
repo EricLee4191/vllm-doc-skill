@@ -1,6 +1,6 @@
 # vLLM 知识库总览
 
-> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`7a7283a0a2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
+> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。v1 架构为默认且唯一的活跃引擎，v0 引擎已完全移除。本文是整个知识库的入口：先给全局地图，再导读 8 个子系统，最后给快速上手与部署优化速查。
 
 ## 1. vLLM 是什么
 <!-- tags: intro, overview, 简介 -->
@@ -87,7 +87,7 @@ flowchart TB
 ### 2.3 配置体系
 <!-- tags: vllmconfig, config, 配置, engineargs, 解析链 -->
 
-所有配置聚合在 `VllmConfig`（`vllm/config/vllm.py:356`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `attention_config` / `speculative_config` / `kv_transfer_config` / `quant_config` / `lora_config` / `observability_config` …。解析链：**CLI flag → `EngineArgs`（`vllm/engine/arg_utils.py:464`，字段名与 flag 一一对应）→ `create_engine_config()` 逐个子 config → `VllmConfig.__post_init__` 跨 config 推导**（如按 executor 能力定 `async_scheduling`）。环境变量集中在 `vllm/envs.py`。
+所有配置聚合在 `VllmConfig`（`vllm/config/vllm.py:357`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `attention_config` / `speculative_config` / `kv_transfer_config` / `quant_config` / `lora_config` / `observability_config` …。解析链：**CLI flag → `EngineArgs`（`vllm/engine/arg_utils.py:465`，字段名与 flag 一一对应）→ `create_engine_config()` 逐个子 config → `VllmConfig.__post_init__` 跨 config 推导**（如按 executor 能力定 `async_scheduling`）。环境变量集中在 `vllm/envs.py`。
 
 ## 3. 子系统导读
 <!-- tags: index, navigation, 导读 -->
@@ -204,7 +204,20 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
 ## 7. 增量更新记录
 <!-- tags: changelog, 增量更新, baseline, 基线 -->
 
-- **2026-10-01**：基线从 `72e7874fa6`（2026-09-30，v0.30.1rc0-477）推进到 `df8fd42116`（2026-10-01，最新 tag **v0.31.0rc2**（2026-09-29），main 领先其 191 commits；上一正式 release 仍为 v0.30.0，`9ed533eb4a`，2026-09-20）。区间 46 commits / 308 文件（+11772/−1717）。主要变更：
+- **2026-10-07**：基线从 `30d4032363`（2026-10-07）推进到 `458ba2edf8`（2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits）。区间共 201 commit（795 文件，+42562/−9028），主线：
+  - **调度/核心**：free KV cache queue 开销削减（#60269，`v1/core/kv_cache_utils.py`）；pause(mode="wait") 排空 async KV loads（#60572）；pooling chunked prefill 用满 context（#48039）；`execute_dummy_batch` RPC 等待受 execute-model timeout 约束（#60398）；encoder cache 对重复多模态输入保留引用（#59942）；session 截断时丢弃过期 block hash（#59103）；Mamba spec 块在 prefill checkpoint 步退役（#59759）。
+  - **投机解码/MRV2**：NGram GPU 投机解码实现（#40704，ModelRunner V2）；AR speculators 更名 StandaloneAR/TargetDependentAR（#60335）；dynamic K 支持 1.2~1.3x kernel 提速（#57053）；MTP fused multi-step 去掉 eager metadata rebuild（#58463）；异构词表 draft 模型留在 MRV1（#59541）；DSpark fill-in 保留 bonus KV slot（#59105）；speculative metrics 在输出合并时保留（#55708）。
+  - **前端/Rust**：ZMQ 端口 TOCTOU 以继承 listener 消除（#54113）；gRPC forbidden token sequences + cache usage（#59837）；`SchemaRoot` 在参数 coercion 与 grammar 间共享（#59408）；移除 PyO3 tool-parser bridge（#59744）；MiniMax M3 tool parser 移植到 parser engine（#59743）；per-session profiling 控制（#57875）；RL entrypoints 合并（#57849）；`offline_utils.py` 迁 `entrypoints/common`（#58052）；Cohere Chat v2 logprobs（#59072）+ 4xx 客户端错误（#60309）；Anthropic count_tokens 应用 output_config/thinking（#59180）。
+  - **结构化输出**：JSON schema 嵌套深度封顶防 500/API-server 卡死（#60036）；xgrammar 多分支 allOf 标记不支持（#59061）；`disable_any_whitespace` 真正禁用空白（#58067）；Guidance `disable_additional_properties` 保留字面值（#58709）；tool-call grammar 从 prompt 实际渲染的 tools 构建（#59879）；tool-parser/tokenizer 兼容性启动期校验（#59749）。
+  - **Attention/KV**：NVFP4 KV cache 支持 SM8x/SM12x + FlashInfer（#46963）；UltraQuant 4-bit KV cache backend（FlyDSL D=256，#57057）；GLM 默认切 fp8 KV cache，E2E 吞吐 +2.3%~5.5%（#60140）；FlashInfer autotune 缓存按 rank 持久化修复 rank-0 死锁（#57635）；HiSparse per-request residency 缓存（#60083）+ 启动期拒绝 cudagraph_mode=FULL（#59688）；flashMLA sparse Q heads pad 到 64（#60029）；FP8 KV cache 扩到 Triton DiffKV/MiMo-V2.6-Flash（#58128）。
+  - **量化**：per-token NVFP4 MoE 支持 ReLU2（#56740）；SM90 上 Humming 优先于 Marlin（#56997）；online quantization API 线性层重量化（MXFP8→FP8 PTPC，#55684）；block-FP8 DeepGEMM experts 跳过 padding 工作（#59128）；OAI Triton MXFP4 MoE 启用 SM12x（#58877）；safetensors 头读取支持其他文件名 checkpoint（#60411）。
+  - **KV offload/NIXL**：KVCR 走 secondary-tier factory 恢复（#58088）+ pool-and-index API（#59899）；SimpleCPU 尊重 speculative cacheability（#60071）；NIXL bump 1.5.0（#56907）+ per-region replicate flags 按 block 数尺寸化（#60107）+ 本地失效 pull peer 元数据恢复（#55471）。
+  - **平台/ROCm**：ROCm 23 commits（AITER MegaMoEV2 for DSv4 #59685、GLM-5.3-Flash BF16 splitk sparse MLA decode #58584、FlyDSL GDN prefill backend #57560、native merge_attn_states gfx942/950 #60159、Kimi-K3 AttnRes+FP8 融合 #59069）；XPU 8 commits（tuned Mamba SSU B70 #57565、Triton fused MoE 调优 #53065）；Python 3.10 EOL 移除（#60402）；Transformers bump 5.19.0（#60381）；tpu-inference v0.31.0（#60190）；vendored DeepGEMM 迁 TORCH_LIBRARY abi3（#48962）。
+  - **模型**：EmbeddingGemma2 多模态 pooling 架构（#60254）+ config 解析精简（#60289）；Nemotron 3.5 ASR（#59827）；LongCat-Flash MLA norms 加载期缩放（#60080）；DSv4.1 mega-attention wq_b/wo_a 加载期置换（#60064）；Mamba2 internal prefill checkpoints（#57329）；Qwen3-VL 未知 fps 除零修复（#60501）。
+  - **其他**：每 DP engine 独立全局 RNG streams（#59788）；`suppress_stdout` 改重定向 fd 1（#59336）；`LLM.score()` 不再改调用方参数（#59959）；watermark 兼容性校验（#56801）；vllm-bench Mooncake 风格 timed-traces replay（#55937）；CI 清理多项（TPU dead scripts #60591、H100 DP+EP 可选 #60540、automatic sharding 五步 #60492）。
+  - 受影响文档：00/01/02/03/04/05/06/07/08 基线头全同步 `458ba2edf8`；02/03/04/05/06/07/08 新增 2026-10-07 基线新增段（01 无实质主题变更，仅基线头）。
+
+- **2026-10-01**：基线从 `72e7874fa6`（2026-09-30，v0.30.1rc0-477）推进到 `bc21cba967`（2026-10-01，最新 tag **v0.31.0rc2**（2026-09-29），main 领先其 191 commits；上一正式 release 仍为 v0.30.0，`9ed533eb4a`，2026-09-20）。区间 46 commits / 308 文件（+11772/−1717）。主要变更：
   - **调度/核心**：encoder-only 长 prompt（>1 step）调度修复（#59029，02 §2）；LoRA 路径纳入 prefix-cache block hash（#59335，02 §3.1）；mamba prefill checkpoint block 预留与 prompt-end eviction（align mode）修复（#59175，02 §3.1）；KV offloading replicated_layout 检测扩到多 group MLA（#57652，05 §9）。
   - **投机解码**：MiniMax-M3 EAGLE3 PP>1 aux-state relay + per-stage FlashInfer autotune（#57197，03/05）；Mamba MTP 支持 FlashInfer ReplaySSM（#52928，04/07）；watermarking 投机解码 context 去重（#56807，07 §7.1）；CT 格式 unquantized ngram 支持（#59431，07 §1）；async scheduling 精度测试（#55840，CI）。
   - **HiSparse**：三项修复——host pool 不再喂 device KV cache residency 指标（#58725）、GPU prefix copy 在 hit 分配后采用（#59282）、请求完成后保留 host prefix publication（#59007，04 §2）。
@@ -265,16 +278,16 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
   - **部署**：新增 scale-out 端点（`/v1/chat/completions/render`、`/inference/v1/generate` 等，`VLLM_ENABLE_SCALE_OUT_ENDPOINTS`）。详见 08。
   - 模型架构数从 290+ 增至 **380+**（新增 DeepSeek-V4/V4.1、GLM-5.3-Flash、Qwen4-Exp、Kimi-K3 等）。
 - **2026-09-19**：基线从 `2f59050eda`（2026-09-12，v0.29.0）推进到 `751f6807d9`（2026-09-19，最新 tag **v0.30.0rc2**，`fa6ff06066`，release candidate）。区间 419 commits。主要变更：
-  - **水印支持投机解码**：新增 `dual_key_gumbel` 算法（双 key gumbel-max，`supports_speculative_decoding=True`，`alpha` 控制 key-B 概率，加权 early-fusion 检测 `vllm/v1/watermarking/gumbel.py:212`）；`spec_decode.py` 新增 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker` 与 `allow_target_only_watermarking`；`_check_watermarking_unsupported`（`vllm/config/vllm.py:1294`）约束 `draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {dspark,eagle,eagle3,mtp}。详见 07 §7.1。
-  - **调度器 RUNNING 准入上限**：`SchedulerConfig.max_num_active_seqs`（`--max-num-active-seqs`，`vllm/config/scheduler.py:70`，`vllm/v1/core/sched/scheduler.py:127-129`，执行点 `vllm/v1/core/sched/scheduler.py:893-894`）；队列上限计数改用 `SharedAdmissionStats`（`vllm/v1/engine/admission_control.py:13`）跨进程无锁计数。详见 02 §2.2。
-  - **投机解码自适应验证**：`enable_adaptive_verification`（`vllm/config/speculative.py:539`）+ `OnlineAcceptanceEstimator`（`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py:313`，501 行，log-odds 线性模型，Triton accumulate/refit/predict kernels）。详见 07 §1.3。
-  - **KV offload 增强**：back-pressure（#50045，`vllm/v1/kv_offload/tiering/backpressure.py`）、KVCR（#53624，`vllm/v1/kv_offload/tiering/kvcr/`）、per-request `max_load_tokens`（#55885，`vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:367`）、chunked region 注册（#51081）、cgroup 检查（#54014）、MLA compact（#56799）。详见 02 §6.1。
+  - **水印支持投机解码**：新增 `dual_key_gumbel` 算法（双 key gumbel-max，`supports_speculative_decoding=True`，`alpha` 控制 key-B 概率，加权 early-fusion 检测 `vllm/v1/watermarking/gumbel.py:211`）；`spec_decode.py` 新增 `create_speculative_target_watermarker`/`create_speculative_draft_watermarker` 与 `allow_target_only_watermarking`；`_check_watermarking_unsupported`（`vllm/config/vllm.py:1318`）约束 `draft_sample_method='probabilistic'`、`rejection_sample_method='standard'`、method ∈ {dspark,eagle,eagle3,mtp}。详见 07 §7.1。
+  - **调度器 RUNNING 准入上限**：`SchedulerConfig.max_num_active_seqs`（`--max-num-active-seqs`，`vllm/config/scheduler.py:69`，`vllm/v1/core/sched/scheduler.py:132-135`，执行点 `vllm/v1/core/sched/scheduler.py:913-894`）；队列上限计数改用 `SharedAdmissionStats`（`vllm/v1/engine/admission_control.py:13`）跨进程无锁计数。详见 02 §2.2。
+  - **投机解码自适应验证**：`enable_adaptive_verification`（`vllm/config/speculative.py:551`）+ `OnlineAcceptanceEstimator`（`vllm/v1/worker/gpu/spec_decode/acceptance_estimator.py:313`，501 行，log-odds 线性模型，Triton accumulate/refit/predict kernels）。详见 07 §1.3。
+  - **KV offload 增强**：back-pressure（#50045，`vllm/v1/kv_offload/tiering/backpressure.py`）、KVCR（#53624，`vllm/v1/kv_offload/tiering/kvcr/`）、per-request `max_load_tokens`（#55885，`vllm/distributed/kv_transfer/kv_connector/v1/offloading/scheduler.py:366`）、chunked region 注册（#51081）、cgroup 检查（#54014）、MLA compact（#56799）。详见 02 §6.1。
   - **Model Runner V2**：DBO FULL CUDA graph（#51700，实现收敛在 `vllm/v1/worker/gpu/cudagraph_utils.py`）；Fast Start 支持 nnode>1（#55468）。详见 03。
   - **分布式**：MoonEP BF16 all2all backend（#52101，`vllm/model_executor/layers/fused_moe/prepare_finalize/moonep.py`）；DeepEPv2 async finalize（#52781/#57236）；PCP+DCP on sparse-MLA（#56157）；PCP decode-only FULL CUDA graphs（#53867）；NIXL attention-HMA PP push prefill（#50494）；Elastic EP CUDA graph 复用（#54985）。详见 05。
   - **Attention**：新增 `COMPOSITE` backend（`vllm/v1/attention/backends/composite.py`，Triton/FlashInfer 或 Triton/FlashAttention 组合，用于 multimodal prefix attention `mm_prefix`，selector 在 `use_mm_prefix=True` 时自动选择）。详见 04 §4.1。
   - **量化**：Quark 原生 W4A16 INT4/UINT4（#48606，`vllm/model_executor/layers/quantization/quark/schemes/quark_w4a16_int4.py`）；CPU FP8 W8A8 linear/MoE（#49942，`csrc/cpu/sgl-kernels/gemm_fp8_w8a8.cpp` + `moe_fp8_w8a8.cpp`）。详见 06。
   - **部署**：新增 `POST /release_kv_cache_memory` 端点（#44890，`vllm/entrypoints/serve/dev/sleep/api_router.py:37`）；`--enable-scale-out` CLI flag 取代 `VLLM_ENABLE_SCALE_OUT_ENDPOINTS` 环境变量（#55176，`vllm/entrypoints/scale_out/factories.py:65`）。详见 08。
-  - **结构化输出重构**：`should_fill_bitmask`/`should_advance` 移除，改用 `_get_constraint_start`（`vllm/v1/structured_output/__init__.py:220`）/`validate_tokens`（`vllm/v1/structured_output/__init__.py:294`）；调度器 grammar 验证迁移到 `structured_output_manager.validate_tokens`（`vllm/v1/core/sched/scheduler.py:2509/2536`）。详见 07。
+  - **结构化输出重构**：`should_fill_bitmask`/`should_advance` 移除，改用 `_get_constraint_start`（`vllm/v1/structured_output/__init__.py:220`）/`validate_tokens`（`vllm/v1/structured_output/__init__.py:294`）；调度器 grammar 验证迁移到 `structured_output_manager.validate_tokens`（`vllm/v1/core/sched/scheduler.py:2567/2536`）。详见 07。
   - **Engram**：新增 `embedding_across_dp`/`dp_shared_memory` 字段 + 异步预取 + DP 分片（#56512）。详见 07 §7.2。
 - **2026-09-20**：基线从 `751f6807d9`（2026-09-19，v0.30.0rc2）推进到 `4868312128`（2026-09-20，最新 tag 仍为 **v0.30.0rc2**，`fa6ff06066`）。区间 30 commits。主要变更：
   - **Humming 特性整合**（#56685）：`utils/humming_utils.py` 拆成 `utils/humming/` 包（`schema.py`/`activation.py`/`linear.py`/`moe.py`），新增 `mxfp6/humming.py` kernel 与 `WeightScale2Type`/`InputQuantizationMode`/`MmaType` 等 schema 类型；显式 input schema 默认禁用 fallback（`allow_fallback` 控制）；Marlin 与 Humming 共享持久 workspace（#57421，`vllm/v1/worker/workspace.py` 新增 `get_persistent_resource`/`get_persistent`）。详见 06。
@@ -285,7 +298,7 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
   - 其他：DeepSeek-V4.1-flash encoder CUDA graph（#56625，`models/deepseek_v41/common/vl_cudagraph.py`）；MiMo V2 bf16 MoE router + mxfp4 MoE（#57784，`GateLinear`）；GLM-5.3-Flash kpool/sparse-indexer 系列修复与性能（#57546/#57534/#57477/#57701/#56810）；SM100 fp8_ds_mla cache scales 修复（#49435）；dead kernel code 清理（#57621，-559 行）。详见 02/04/06。
 - **2026-09-21**：基线从 `4868312128`（2026-09-20，v0.30.0rc2）推进到 `86ce4d10e2`（2026-09-21，最新 tag 仍为 **v0.30.0rc2**，`fa6ff06066`）。区间 11 commits。主要变更：
   - **Profiler 统一为平台感知**（#57460）：torch profiling 逻辑从各 worker（`gpu_worker.py`/`cpu_worker.py`/`xpu_worker.py` 各删 22~41 行）收敛到 `vllm/profiler/wrapper.py` 工厂 `create_worker_profiler`（:675）；`ProfilerConfig` 新增 `torch_profiler_activities`（`config/profiler.py:55`，`CPU`/`CUDA`/`PrivateUse1`/`XPU`，缺省按平台默认）；`WorkerProfiler` 基类新增 `should_annotate` 属性（`wrapper.py:60`）。详见 08 §4.9。
-  - **sleep 时 KV connector cache reset 失败上抛**（#54581）：`EngineCore` 的 `reset_prefix_cache` 返回 False 时抛 `RuntimeError`（`vllm/v1/engine/core.py:874`），`pause_generation` 的 idle callback 异常经 future 传播而非吞掉。
+  - **sleep 时 KV connector cache reset 失败上抛**（#54581）：`EngineCore` 的 `reset_prefix_cache` 返回 False 时抛 `RuntimeError`（`vllm/v1/engine/core.py:877`），`pause_generation` 的 idle callback 异常经 future 传播而非吞掉。
   - **MoRIIO KV connector 大改**（#51052，+2746 行）：READ 模式传输 hybrid mamba/KDA recurrent state，`moriio_connector.py`/`moriio_layout.py` 重写。
   - 其他：spec decode dummy draft 步不再经 stale block-table 行写 KV（#56734，`vllm/v1/worker/gpu/spec_decode/speculator.py`）；DSV4.1 mHC 小 TP batch 系数 overlap（#57603）；ROCm Engram 表留 host 内存（#57491）；HY4 full CUDA graph capture 记录 indexer completion event（#57811）；XPU communicator world_size 可见性修复（#57779）；Kthena/EPD 文档更新。详见 02/03/06/07。
 - **2026-09-21（第二次）**：基线从 `86ce4d10e2`（2026-09-21，v0.30.0rc2）推进到 `8b98b7d0b4`（2026-09-21，最新 tag 仍为 **v0.30.0rc2**，`fa6ff06066`；main 已领先 `v0.30.0` release 分支 310+ commits）。区间 27 commits。主要变更：
@@ -297,3 +310,41 @@ docker run --rm --gpus all --ipc=host -p 8000:8000 \
   - **Engram DP shared memory 默认开启**（#57651，`config/engram.py:52/86`）：同机 co-located DP replica 默认共享 n-gram 嵌入表 host 内存。详见 07 §7.2。
   - **derender 流式解析文档化**（#57922，`docs/serving/online_serving/derenderer.md`）：scale-out derender 的无状态 `stream_state` 流式协议 + 流式 parity 测试。详见 07 §1。
   - 其他：sparse attention metadata 去冗余（#57885，`mla/indexer.py`/`sparse_swa.py`）；8 个 CI-only commits（XPU/ROCm/Intel job 调整）。
+
+**2026-10-04 增量更新**：基线从 `df8fd42116`（2026-10-01）推进到 `bc21cba967`（2026-10-03），main 仍领先 v0.31.0rc2。区间共 143 commit（670 文件，+36701/−14613），主线：
+
+- **EPLB contention-aware 迁移批处理**（#52641）：新 `vllm/distributed/eplb/migration_scheduler.py`（`schedule_migration_batches:20`），每 rank 每批最多与一个 peer 通信；`EPLBConfig.migration_batching_enabled`（`config/parallel.py:116`）。
+- **PCP decode 分片**（#52162）：`pcp_shard_decode_requests`（`config/parallel.py:615`）——PCP-only 复制 KV，decode 请求可有单一 PCP owner。
+- **ModelExpress 原生 weight transfer backend**（#58399）：`vllm/distributed/weight_transfer/modelexpress.py`（外部包 `ai-dynamo/modelexpress`）。
+- **sleep 模式资源释放**：KV-init runtime state offload（#59158）+ WorkspaceManager scratch 释放（#59156，`v1/worker/workspace.py:49`）。
+- **HiSparse 系列**：MTP FULL graphs 接受率坍塌修复（#59309）、KV cache 按分配 group 定容（#59450）、chunked-prefill 抢占活锁修复（#59494）、重复 prefix scan/residency 更新消除（#57930）。
+- **KV connector**：NIXL host-buffer 拷贝跨 cache group 合并（#54483）+ KV 过期后的 completion 通知计数（#58875）；Mooncake 空 pull 抑制 completion（#59347）；async KV load 的 KV-fetch stage gauges（#58874）；async KV load 写入的 block 精确豁免 zeroing（#59504）。
+- **Frontend**：`/inference/v1/generate` 加 `output_mode`（RFC #56851 Phase 1，#58588，`entrypoints/scale_out/token_in_token_out/protocol.py:224`）；Rust frontend gRPC port 暴露（#59659）+ `hf` response template parser（#59005）+ 结构化 tag grammar 快照（#59393）；内置 JSON log formatter（#58739，`config/logging.py:31`）；Anthropic tool_addition/tool_removal content blocks（#57693）；GLM-4.7 非严格 tool call 浅层结构 tag（#56403）。
+- **模型迁移到 Transformers modeling backend**：GPT-NeoX/Phi/Seed-OSS/Jais2（#59701）、Glm/Arcee/CWM/Mellum（#59679）；删除 Transformers < 5.16.1 代码路径（#59762）；GLM-5.3/Qwen4-Exp 用上游 config/processor（#57387）。
+- **性能**：GLM-5.3 fused multi-step decode（#57443，并发 1 E2E +13.3%）+ sparse MLA index 跨层复用（#59464，3.5~3.9x）；FlashInfer CuteDSL MegaMoE（#54049）+ one-sided MoE all2all fp8 combine（#57995）；GDN 纯投机行切片（#58763）；PP 跳过离开引擎请求的 sampled-token 广播（#58542）；per-token FP8 量化 value-only reduction（#59800）；flash-maxsim late-interaction Triton kernel（#40337）。
+- **投机解码**：MRV2 多层 MTP per-module LM heads（#58921）+ sampling mask replay（#59359）；Kimi-K3 FlashInfer 投机 KDA backend（#54255）；Sarvam MLA EAGLE3/DSpark PP（#55902）。
+- **量化/硬件**：MiniMax-M3 MSA 稀疏路径 NVFP4 KV cache（#59300）；ModelOpt 混合精度 NVFP4 检测（#56050）；ROCm Kimi-K3 gfx942 MXFP4→int4（#51274）；SM120 占用率自适应 split-K（#58482）；XPU B70 W8A8 block-FP8 GEMM 调优（#56063）。
+- **安全/正确性**：structured-output 请求不得从无 mask 行采样（#54442）；tokenizer max_token_id off-by-one（#59491）；weight loader dtype 相等校验（#51792）；DeepSeek-OCR 零和像素张量接受（#59417）。
+
+**2026-10-07 增量更新**：基线从 `d0d6e5f3a2`（2026-10-05）推进到 `30d4032363`（2026-10-07），main 领先 v0.31.0（`db9527a468`，2026-10-02）381 commits。区间共 5 commit（35 文件，+484/-478），主线：
+
+- **GLM-5.3-Flash kpool sparse indexer DCP 支持**（`30d4032363` / #59211）：kpool sparse indexer 支持 DCP（distribute checkpoint）（9 文件 +242/-37）。详见 03 篇。
+- **LoRA 移除 tensorizer**（`f9c9e8ac24` / #60024）：LoRA 加载路径移除 tensorizer 依赖（9 文件 +30/-375，净删 345 行）。详见 03 篇。
+- **device-side mm normalization 扩到 Kimi K2.5/K3**（`0e468adb43` / #59278）：device 侧多模态 normalization 扩展到 Kimi K2.5/K3（11 文件 +130/-15）。详见 03 篇。
+- **MLA fp8_ds_mla KV cache 支持 NoPE-512 模型（SM90）**（`ff53f32409` / #59246）：SM90 上 NoPE-512 模型的 fp8_ds_mla KV cache 支持（5 文件 +82/-44）。详见 04 篇。
+- **Voxtral HF reference 测试在 Transformers v5 重新启用**（`d3547f9d03` / #59771，测试）。
+
+**2026-10-06 增量更新**：基线从 `bc21cba967`（2026-10-03）推进到 `d0d6e5f3a2`（2026-10-05），main 领先 v0.31.0（`db9527a468`，2026-10-02）376 commits。区间共 42 commit（153 文件，+5468/−1352），主线：
+
+- **sleep 模式释放 CUDA graph 池**（#59160）：新 `vllm/compilation/cudagraph_pool.py`（`capture_pool` contextmanager）；`ModelConfig.sleep_mode_offload_cudagraph` + CLI `--sleep-mode-offload-cudagraph`；`VllmConfig.use_cumem_cudagraph_pool` 为真时 CUDA graph 捕获分配进 cuMem allocator 的 `cudagraph` tag 池，sleep 时随权重 offload 一并释放；NCCL graph registration 会 pin 该池，故自动 `NCCL_GRAPH_REGISTER=0`。详见 08。
+- **DCP**：TokenSpeed MLA 支持 block-interleaved DCP（#59462，`v1/attention/backends/mla/tokenspeed_mla.py` `supports_mtp_with_cp_non_trivial_interleave_size=True`）；空 KV shard 输出（NaN）由下游 DCP combine 掩码。详见 05。
+- **prefill token scoring per-row candidate IDs**（#56984，M2 of #56860）：`SamplingParams.prompt_logprob_token_ids`（`[num_rows, num_ids]` 整数数组/嵌套 list，-1 填充得 -inf），Rust frontend `logprobs.rs`/`request.rs` 同步。详见 07。
+- **安全**：untrusted media 路径限制 Pillow 图片格式（#60022，`multimodal/image.py`）。详见 06。
+- **KV offload（SimpleCPU）**：MRV2 resume 时重置 eager-store placement 状态（#57816）；cache reset 释放 pending CPU lookup pins（#59862，`v1/simple_kv_offload/manager.py`）。详见 02。
+- **NIXL**：heartbeat 计入 remote engine 活动（#59873，`kv_connector/v1/nixl/base_worker.py`）。详见 02。
+- **LoRA**：确定性 split-K=8 shrink kernel 保 batch invariance（#59377，`lora/ops/triton_ops/lora_shrink_op.py`）；代码清理（#60017）。详见 03。
+- **ROCm/RDNA3**：W4A16 split-K 精度与确定性修复（#54706，`csrc/rocm/q_gemm_rdna3*.cu`）；AITER bump 0.1.24.post1（#59794）；ROCm 内存 profiling 保留 config（#58014）；ROCM_ATTN sliding-window 边界（#59550）。详见 06。
+- **模型**：GraniteMoeHybrid/FalconH1/Zamba2 spec decoding 下 Mamba page size AssertionError 修复（#59975）；非 gated MoE 加载 stacked expert 权重（#59031）；Qwen3ASR 声明 SupportsEagle3（#52824）；DeepSeek-V4 MegaMoE shared-expert finalize 独立于 linear post-load 顺序（#59927）。详见 03。
+- **Qwen4Exp 系列**：QSA attention 尊重 `--kv-cache-dtype-skip-layers`（#60023）；HC up projection 留在 skinny GEMM 路径（#60027）；Quark checkpoint 下 PLE 表非量化加载（#59443）；PLE embedding 接受 INC（AutoRound）checkpoint（#59990）；QSA QKVG 与 indexer QK 投影合并（#59533）。详见 03/04。
+- **Frontend**：model-not-found 404 列出已服务模型名（#59889）；流式错误在首 token 前返回（#40986）；scale-out token 流保留 abort finish_reason（#47933）；Responses API 复用流式 item id（#59859）。详见 07/08。
+- **其他**：SM121 TP=2 skinny-GEMM plans（#59632）；int4_per_token_head 支持非 2 幂 head size（#56198）；DSv4.1 compressor ring 避开 null block（#58560）；XPU DeepSeek V4 FP8 sparse decode graph-capturable（#59159）；单声道音频归一化 1D（#56691）；FlashInfer all_reduce backend 选择修复（#56891）；batch-invariant mean 保留输出 dtype（#59106）；对齐 KV block size 对照全部 attention backend 校验（#58457）；Transformers backend 视频支持（#57441）；Transformers bump 5.18.0（#59621）；MoRIIO discovery heartbeat 在 worker 持 GIL 时保持运行（#59441）。

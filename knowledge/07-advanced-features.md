@@ -1,6 +1,6 @@
 # 投机解码与高级推理特性
 
-> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`7a7283a0a2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 本文覆盖 vLLM 的高级特性：**投机解码 (speculative decoding)**、**采样 (sampling)**、**结构化输出 (structured output)**、**LoRA 多适配器**、**多模态 (multimodal)**、**reasoning/思考模型支持**，以及 v0.29 新增的**文本水印 (watermarking)** 与 **Engram/PLE（n-gram 嵌入存储）**。重点讲架构与部署/调优旋钮。
 
@@ -40,7 +40,7 @@ class SpecDecodeMetadata:
 ### 1.2 支持的 draft 方式
 <!-- tags: draft, method, ngram, eagle, mtp -->
 
-`SpeculativeConfig.method` 的取值（`vllm/config/speculative.py:72-82`，`SpeculativeMethod` Literal）：
+`SpeculativeConfig.method` 的取值（`vllm/config/speculative.py:73-82`，`SpeculativeMethod` Literal）：
 
 | method | 说明 | 是否需要 draft 模型权重 |
 |---|---|---|
@@ -96,7 +96,7 @@ class SpecDecodeMetadata:
 ### 1.4 如何配置
 <!-- tags: speculative-config, 配置, cli, 字段, 示例 -->
 
-`SpeculativeConfig`（`vllm/config/speculative.py:388`）主要字段：
+`SpeculativeConfig`（`vllm/config/speculative.py:387`）主要字段：
 
 - `num_speculative_tokens`：投机 token 数 K。若未给，默认取 draft 模型 config 的 `n_predict`。
 - `model`：draft 模型 / eagle head / MTP 权重路径；ngram 时传 `"ngram"`。
@@ -174,7 +174,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 ### 2.2 SamplingParams 字段
 <!-- tags: sampling-params, 字段, 采样参数, beam-search -->
 
-`SamplingParams`（`vllm/sampling_params.py:211`）关键字段：
+`SamplingParams`（`vllm/sampling_params.py:268`）关键字段：
 - `n`(1)、`presence_penalty`(0)、`frequency_penalty`(0)、`repetition_penalty`(1.0)、`temperature`(1.0)、`top_p`(1.0)、`top_k`(0=禁用)、`min_p`(0.0)、`seed`、`stop`/`stop_token_ids`、`ignore_eos`、`max_tokens`(16)、`min_tokens`(0)。**v0.30 安全校验（#57731）**：`max_tokens` 未设置时按 `max_model_len - prompt_len` 填充，`InputProcessor` 随后校验 `min_tokens <= max_tokens`（此前 `min_tokens` 在 `max_tokens` 未设时不检查，可超过实际可生成上限）。
 - logprobs：`logprobs`、`prompt_logprobs`、`logprob_token_ids`（generative_scoring 用，只取指定 token 的 logprob）、`flat_logprobs`。
 - `structured_outputs`（`StructuredOutputsParams`）、`logit_bias`、`allowed_token_ids`、`bad_words`、`thinking_token_budget`、`repetition_detection`。
@@ -235,7 +235,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 ### 4.2 配置/调优旋钮
 <!-- tags: lora, 配置, 旋钮, max-loras, max-rank -->
 
-`LoRAConfig`（`vllm/config/lora.py:32`）/ CLI（`arg_utils.py:1517` 附近）：
+`LoRAConfig`（`vllm/config/lora.py:30`）/ CLI（`arg_utils.py:1517` 附近）：
 - `--enable-lora`：总开关。
 - `--max-loras`（默认 1）：单 batch 最多同时激活的 LoRA 数。
 - `--max-lora-rank`（默认 16）：最大 rank（支持 1/8/16/32/64/128/256）。
@@ -256,7 +256,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 <!-- tags: multimodal, 架构, registry, processor, encoder -->
 
 - **`MultiModalRegistry`**（`vllm/multimodal/registry.py:89`）：注册每模型的 processor（`register_processor` 装饰器）、`ProcessingInfo`、`DummyInputsBuilder`。**v0.30 瘦身（#57913/#57967）**：`supports_multimodal_inputs` 与 receiver cache 工厂从 registry 迁出——前者移到 `ModelConfig.supports_multimodal_inputs` **缓存属性**（`config/model.py`，按 `is_multimodal_model`/`runner_type`/mm limits 缓存；multimodal draft 模型如 Qwen3_5MTP 声明 `SupportsMultiModal` 但无 processor，`runner_type="draft"` 时静默退回 text-only），后者迁到 `vllm/multimodal/cache/factories.py`（`worker_receiver_cache_from_config` 等）。
-- **`BaseMultiModalProcessor`**（`vllm/multimodal/processing/processor.py:1031`）：`apply()` 调 HF processor（`_call_hf_processor`）→ `_get_prompt_updates`（把 `<image>` 等占位符替换成 N 个 embed token）→ `_find_mm_placeholders` 生成 `PlaceholderRange`（`vllm/multimodal/inputs.py:122`，记录每个 mm item 在 prompt 中的 offset/length/embeds 区间）。
+- **`BaseMultiModalProcessor`**（`vllm/multimodal/processing/processor.py:1032`）：`apply()` 调 HF processor（`_call_hf_processor`）→ `_get_prompt_updates`（把 `<image>` 等占位符替换成 N 个 embed token）→ `_find_mm_placeholders` 生成 `PlaceholderRange`（`vllm/multimodal/inputs.py:122`，记录每个 mm item 在 prompt 中的 offset/length/embeds 区间）。
 - **`MultiModalBudget`**（`vllm/multimodal/encoder_budget.py:40`）：计算 encoder 计算预算与缓存大小（`get_encoder_budget = min(compute_budget, cache_size)`），以及每 prompt/每 batch 的 mm item 上限（`mm_max_items_per_prompt`/`mm_max_items_per_batch`）。区分 tower modality（过 encoder）与 embed-only modality（`enable_mm_embeds`，直接传预计算 embedding）。
 - **encoder 与 LLM 衔接**（`gpu_model_runner.py`）：
   - scheduler 输出 `scheduled_encoder_inputs`（哪些 mm item 本步要跑 encoder）。
@@ -316,7 +316,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 
 - **Watermarker**（`watermarker.py`）：采样时对每个 token 的 logits 按 PRF 生成的 per-context 偏置做 Gumbel-max 扰动，使"绿名单"token 更易被选中。`GumbelWatermarker`（`gumbel.py`）+ `PhiloxPRF`（`prfs/philox.py`，64-bit key，`context_width` 个前序 token 作 context）。
 - **WatermarkDetector**（`detector.py`）：对已生成 token 序列做统计检测，产出 `WatermarkDetection`（`score`/`p_value`/`is_watermarked`），供下游验证文本是否带水印。
-- **配置**：`WatermarkConfig`（`vllm/config/watermarking.py:28`，`key`/`algorithm`/`alpha=0.1`/`context_width=4`/`deduplicate_contexts="single_turn"`/`prf="philox"`/`allow_target_only_watermarking=False`），CLI `--watermark-config`（`arg_utils.py:1738`，`create_watermark_config` :2041）。`VllmConfig.watermark_config`（`config/vllm.py:392`）。
+- **配置**：`WatermarkConfig`（`vllm/config/watermarking.py:27`，`key`/`algorithm`/`alpha=0.1`/`context_width=4`/`deduplicate_contexts="single_turn"`/`prf="philox"`/`allow_target_only_watermarking=False`），CLI `--watermark-config`（`arg_utils.py:1738`，`create_watermark_config` :2041）。`VllmConfig.watermark_config`（`config/vllm.py:394`）。
 - **两种算法**（`WatermarkingAlgorithm`，`config/watermarking.py:15`）：
   - `gumbel`（默认）：单密钥 Gumbel-max，**不支持投机解码**（`supports_speculative_decoding` 属性为 `False`）。
   - `dual_key_gumbel`（v0.30 新增）：**双密钥** Gumbel-max，target 与 draft 各用一个密钥角色，`supports_speculative_decoding=True`；`alpha` 控制选 key B 的概率，检测用加权 early fusion（`gumbel.py:212`）。
@@ -326,7 +326,7 @@ CLI（`vllm/engine/arg_utils.py`）：
 ### 7.2 Engram / PLE（n-gram 嵌入存储与分片）
 <!-- tags: engram, ple, n-gram, embedding, 嵌入, etp, 分片 -->
 
-`EngramConfig`（`vllm/config/engram.py:41`，CLI `--engram-config`）：为带 n-gram 层的模型（DeepSeek-V4.1、Qwen4-Exp 的 PLE 层）配置 **n-gram 嵌入表的存储与分片**。
+`EngramConfig`（`vllm/config/engram.py:34`，CLI `--engram-config`）：为带 n-gram 层的模型（DeepSeek-V4.1、Qwen4-Exp 的 PLE 层）配置 **n-gram 嵌入表的存储与分片**。
 
 - `cpu_offload`（默认 `True`；**v0.30**：legacy `VLLM_PLE_CPU_OFFLOAD` 环境变量已移除，固定默认开启）：嵌入表是否 offload 到 CPU（经 UVA 在独立 CUDA stream 上按需取行）。
 - 分片：默认每个 DP rank 持独立 TP 分片副本；`embedding_across_dp=True` 时跨 TP+DP rank 共享一张嵌入表，用 **ETP 进程组**（`get_etp_group()`，见 05 §3.3）把单张表切到多 rank；`dp_shared_memory=True`（需 `cpu_offload=True`）让同节点 DP 副本共享 CPU 侧嵌入表（每节点每 TP shard 只存一份，省 host 内存，需足够 `/dev/shm`）。
@@ -417,3 +417,33 @@ CLI（`vllm/engine/arg_utils.py`）：
 - 投机解码 + 结构化输出 + reasoning 三者有复杂交互（bitmask 需覆盖每个投机位置、reasoning 结束检测在 draft 窗口内模拟），是 vLLM 较易出 bug 的交叉区域（源码多处注释引用 issue #42452/#43388/#44006）。
 - `draft_tensor_parallel_size` 必须等于 target TP（draft_model 路径强制，`draft_model.py:71`）。
 - MTP 的 `num_speculative_tokens` 须整除 checkpoint 的 `n_predict`。
+
+## 10. 2026-10-04 基线新增
+<!-- tags: spec-decode, eagle3, mtp, sampling-mask, structured-output, 基线新增 -->
+
+- **投机解码**：MRV2 多层 MTP per-module LM heads（#58921）+ sampling mask replay（#59359）；Sarvam MLA 启用 EAGLE3/DSpark PP（#55902）；Transformers backend 注意力层名加模型前缀限定（#59293）。
+- **structured output 正确性（#54442）**：structured-output 请求不得从无 mask 的行采样。
+- **Responses API**：标准 reasoning content-part 事件（#59652）；checkpoint response template 解析 tool call 与 reasoning（#58604）；Step-3.5 parser 移植到 streaming parser engine（#59321）；chat_parsing 流式事件增强（#58603）。
+- **Anthropic 兼容**：tool_addition/tool_removal content blocks（#57693）；`x-anthropic-billing-header` 从 `/v1/chatcompletions` 剥离（#59419）。
+- **GLM-4.7 非严格 tool call**：浅层结构 tag 约束（#56403）。
+- **多模态**：GLM-5.3-Flash vision tower 图像输入崩溃修复（#59126）；SHM processor cache 引用计数修复（#59695）；pooling 多模态 cache miss 不崩溃（#58975）；Qwen3-Omni M-RoPE offset 双计修复（#58890）；GLM-5.3 image encoder cache 按精确 token 上限定容（#59565）。
+- **tokenizer**：max_token_id off-by-one 修复（#59491）；tokenizers 升 0.23.2（duplicate-pattern 支持，#59796）。
+- **Engram**：Triton 3.8 lookup kernel 间歇崩溃修复（#59639）；DSv4.1 Engram host lookup 加速（排序行 + 内联大 lookup，#59327）。
+
+## 11. 2026-10-06 基线新增
+<!-- tags: 基线更新, prompt_logprob_token_ids, prefill_scoring, frontend, responses_api -->
+
+- **prefill token scoring per-row candidate IDs**（`e319f86f15` #56984，M2 of #56860）：
+  - `SamplingParams.prompt_logprob_token_ids`（`vllm/sampling_params.py`）：`[num_rows, num_ids]` 整数数组或嵌套 list；-1 填充得 -inf；row i 对其 IDs 作为 prompt token `prompt_logprob_start + i + 1` 的预测打分，最后一个 prompt row 排除
+  - Rust frontend 同步：`rust/src/text/src/lower/logprobs.rs`/`request.rs`；`v1/engine/input_processor.py`/`v1/worker/gpu/sample/prompt_logprob.py`
+- **Frontend 修复**：model-not-found 404 列出已服务模型名（`7867d6c52d` #59889）；流式错误在首 token 前返回（`b0eb87fe49` #40986）；scale-out token 流保留 abort finish_reason（`50b404e71e` #47933）；Responses API 复用流式 item id（`6f75cc7d5d` #59859）
+- **多模态**：Transformers backend 视频支持（`34051ad714` #57441）；单声道音频归一化 1D（`0872ddf4b9` #56691）
+
+## 12. 2026-10-07 基线新增（`458ba2edf8`）
+<!-- tags: 基线更新, frontend, rust, structured_output, xgrammar, tool_parser, profiling -->
+
+- **Rust frontend**：gRPC forbidden token sequences + cache usage（`14e3902d51` #59837）；`SchemaRoot` 在参数 coercion 与 grammar 间共享（`bc8dd4ad27` #59408）；移除 PyO3 tool-parser bridge（`b3082d3044` #59744）；MiniMax M3 tool parser 移植到 parser engine（`5145e35e50` #59743）；complete marker 处从 safe text 回溯（`7436a7f119` #59563）；gRPC 请求保留显式零采样值（`29ae81fe83` #60115）；completion stream choices 始终含 token_ids（`b49c921a27` #60286）；tool defer_loading 透传 chat templates（`6bbad6acdf` #60203）。
+- **结构化输出**：JSON schema 嵌套深度封顶，防 500 与 API-server 卡死（`5cd8a2626b` #60036）；xgrammar 多分支 allOf 标记不支持（`049507aa76` #59061）；`disable_any_whitespace` 真正禁用空白（`73c742b09c` #58067）；Guidance `disable_additional_properties` 保留字面值（`60932a6401` #58709）；tool-call grammar 从 prompt 实际渲染的 tools 构建（`2e06395fd3` #59879）；tool-parser/tokenizer 兼容性启动期校验（`38dc8ee500` #59749）；未配置 tool parser 时输出缓冲的 post-reasoning 文本（`d6fe5dca68` #58911）；Mistral pre-v11 意外 tool call JSON 不再失败请求（`a3e0243b1c` #54844）；一个 delta 完成多个 tool call 时全部流式输出（`fdfc171a74` #60354）。
+- **前端 API**：Cohere Chat v2 返回 logprobs（`ef014bdf06` #59072）+ 客户端错误返回 4xx（`43b4aaea3e` #60309）；Anthropic count_tokens 应用 output_config/thinking（`1995c0fcd0` #59180）；Responses namespace 别名修复（`ed825aafc0` #59723）；generate 输出 logprobs 用整数 token IDs（`7b665f7a58` #58181）；`LLM.score()` 不再改调用方参数（`2dd887426e` #59959）；batch chat completions 尊重默认 penalties（`d77cf81156` #60307）；max_log_len 未设时记录完整请求体（`db6e3cd8c4` #60310）；GPU-less render server 应用 model-default reasoning parser（`09e0ce3d82` #54835）；`reasoning_ended` 透传 render→generate（`18c8a65edd` #60059）。
+- **稳定性**：ZMQ 端口 TOCTOU 以继承 listener 消除（`f226af0e11` #54113）；`suppress_stdout` 改重定向 fd 1（`e73895a5df` #59336）；per-session profiling 控制（Python + Rust，`6fddc9b21e` #57875）；RL entrypoints 合并（`4187ade7b8` #57849）；`offline_utils.py` 迁 `entrypoints/common`（`459764104d` #58052）。
+- **多模态**：encoder cudagraph padding 逻辑优化（`8352b2427f` #58925）；Qwen3-Omni interleaved M-RoPE 边界修复（`8c417a2dae` #59842）。

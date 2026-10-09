@@ -1,6 +1,6 @@
 # 分布式并行（TP/PP/DP/EP）与 KV 传输
 
-> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`v0.31.0rc2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20；V1 架构为当前引擎）。所有路径相对于仓库根 `/Users/baofeng/baofeng/github/vllm`。
 > 核心目录：`vllm/distributed/`、`vllm/config/parallel.py`、`vllm/v1/executor/`、`vllm/v1/worker/`。
 
 ---
@@ -165,14 +165,14 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 
 ### 3.4 Stateless 组（DP/EP，用于 elastic）
 <!-- tags: stateless, 无状态, elastic, store, 动态组 -->
-`StatelessGroupCoordinator`（`vllm/distributed/stateless_coordinator.py`）+ `StatelessProcessGroup`（`vllm/distributed/utils.py:200`）：不依赖 `torch.distributed` 全局状态，靠一个共享 `Store`（coord store）交换自选的组端口，rank 0 bind 3 个 socket 并把端口写入 store，其他 rank 读取后各自建 NCCL 通信子。用于 elastic EP 运行时动态建/拆 DP/EP 组。
+`StatelessGroupCoordinator`（`vllm/distributed/stateless_coordinator.py`）+ `StatelessProcessGroup`（`vllm/distributed/utils.py:196`）：不依赖 `torch.distributed` 全局状态，靠一个共享 `Store`（coord store）交换自选的组端口，rank 0 bind 3 个 socket 并把端口写入 store，其他 rank 读取后各自建 NCCL 通信子。用于 elastic EP 运行时动态建/拆 DP/EP 组。
 
 ---
 
 ## 4. 通信后端与 device_communicators
 <!-- tags: nccl, allreduce, custom-allreduce, nvls, p2p, 通信 -->
 
-`GroupCoordinator` 按平台实例化 `device_communicator`（`current_platform.get_device_communicator_cls()`）。CUDA 上是 `CudaCommunicator`（`vllm/distributed/device_communicators/cuda_communicator.py:29`）。
+`GroupCoordinator` 按平台实例化 `device_communicator`（`current_platform.get_device_communicator_cls()`）。CUDA 上是 `CudaCommunicator`（`vllm/distributed/device_communicators/cuda_communicator.py:35`）。
 
 ### 4.1 CudaCommunicator 持有的后端
 <!-- tags: cuda-communicator, 后端, pynccl, custom-allreduce, symm-mem -->
@@ -225,7 +225,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 ## 5. Executor 层
 <!-- tags: executor, multiproc, ray, worker -->
 
-`Executor`（`vllm/v1/executor/abstract.py:41`）是抽象基类，`get_class(vllm_config)` 按 `distributed_executor_backend` 选实现：
+`Executor`（`vllm/v1/executor/abstract.py:54`）是抽象基类，`get_class(vllm_config)` 按 `distributed_executor_backend` 选实现：
 - `"ray"` → `RayDistributedExecutor`（`VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1` 时 `RayExecutorV2`）
 - `"mp"` → `MultiprocExecutor`
 - `"uni"` → `UniProcExecutor`（world_size==1）
@@ -317,7 +317,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
   - `wait_for_save()`：forward 结束前确保保存完成。
   - `get_finished(finished_req_ids)`：返回异步传输完成的请求 id。
   - `register_kv_caches` / `register_cross_layers_kv_cache`（NIXL 预注册）、`get_handshake_metadata`（P/D 带外握手）、`build_connector_worker_meta`。
-- `SupportsHMA`（`vllm/distributed/kv_transfer/kv_connector/v1/base.py:99`）：支持 hybrid memory allocator 的连接器需实现 `request_finished_all_groups`；否则要 `--disable-hybrid-kv-cache-manager`。
+- `SupportsHMA`（`vllm/distributed/kv_transfer/kv_connector/v1/base.py:100`）：支持 hybrid memory allocator 的连接器需实现 `request_finished_all_groups`；否则要 `--disable-hybrid-kv-cache-manager`。
 
 ### 6.5 集成点
 <!-- tags: integration, 集成, model-runner-mixin, aggregator, 生命周期 -->
@@ -372,7 +372,7 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 - `elastic_execute.py::ElasticEPScalingExecutor`：worker 侧执行 `prepare_reconfiguration`、`transfer_weights(old_dp_size, new_dp_size)`、`switch_and_prepare`/`switch_and_remove`（切换 active 组，`_replace_active_groups`）、`_perform_eplb_reshuffle`、`commit_scale_up/down`。
 - `standby_state.py`：`create_standby_groups` 预建目标 dp_size 的 standby DP/EP/EPLB 组，扩容时快速切换。
 - **CUDA graph 复用（v0.30，#54985）**：reconfiguration（扩缩容）后**复用**已捕获的 CUDA graph 而非重新 capture，避免每次扩缩容的 capture 开销。
-- 入口：`DPEngineCoreProc`（`vllm/v1/engine/core.py:2069`）持 `eep_scaling_state`；`ReconfigureDistributedRequest`（`vllm/v1/engine/__init__.py`）承载扩缩容请求。
+- 入口：`DPEngineCoreProc`（`vllm/v1/engine/core.py:2080`）持 `eep_scaling_state`；`ReconfigureDistributedRequest`（`vllm/v1/engine/__init__.py`）承载扩缩容请求。
 - env：`VLLM_ELASTIC_EP_SCALE_UP_LAUNCH`、`VLLM_ELASTIC_EP_DRAIN_REQUESTS`。
 
 ---
@@ -525,3 +525,27 @@ v0.29 另新增 `suspend_device_comms()` / `resume_device_comms()`（`parallel_s
 **模型层并行**
 - `vllm/model_executor/layers/linear.py` — `ColumnParallelLinear` / `RowParallelLinear`（TP）。
 - `vllm/model_executor/layers/fused_moe/{config,layer}.py` — `FusedMoEParallelConfig`（EP 尺寸计算）/ `FusedMoE`（EP/EPLB 集成）。
+
+## 12. 2026-10-04 基线新增
+<!-- tags: eplb, pcp, weight-transfer, model-express, all-reduce, 基线新增 -->
+
+- **EPLB contention-aware 迁移批处理（#52641）**：新 `vllm/distributed/eplb/migration_scheduler.py`——`MigrationFlow`（`:11`）+ `schedule_migration_batches`（`:20`）：每条迁移流放进第一个两端点都空闲的 batch，保证**每 rank 每批最多与一个 peer 通信**（以吞吐换网络争用）；`schedule_migration_batches_for_layers`（`:106`）按层保持 batch 边界；开关 `EPLBConfig.migration_batching_enabled`（`config/parallel.py:116`，默认关）。
+- **PCP decode 分片（#52162）**：`pcp_shard_decode_requests`（`config/parallel.py:615`）——PCP-only 执行复制 KV cache，decode 请求可指定单一 PCP owner 分片；DCP 分片 KV 则要求全 rank 参与。
+- **ModelExpress 原生 weight transfer backend（#58399）**：`vllm/distributed/weight_transfer/modelexpress.py` 注册 `"modelexpress"` backend，re-export 外部包 `ai-dynamo/modelexpress`（main 分支 `modelexpress_client/python`）的 `ModelExpressWeightTransferEngine`。
+- **batch-invariance 下 custom all-reduce（#58623）**：`VLLM_BATCH_INVARIANT` 时启用 custom all-reduce；NCCL pin 移出 weight-transfer group（#59500）。
+- **Elastic EP local-only scale-up 卡死修复（#57820）**。
+
+## 13. 2026-10-06 基线新增
+<!-- tags: 基线更新, dcp, tokenspeed_mla, block_interleaved -->
+
+- **TokenSpeed MLA + block-interleaved DCP**（`84bcbc6264` #59462，`v1/attention/backends/mla/tokenspeed_mla.py`）：
+  - `supports_mtp_with_cp_non_trivial_interleave_size = True`；NIXL 在模型构造后解析 interleave，保留 config 而非缓存初始 interleave size（`cp_kv_cache_interleave_size`）
+  - DCP rank 无本地 KV 时可返回未定义输出（NaN），下游 DCP combine 路径必须掩码空 shard 并在合并 partial attention 时忽略其输出
+
+## 14. 2026-10-07 基线新增（`458ba2edf8`）
+<!-- tags: 基线更新, nixl, kv_offload, kvcr, dp, ep, eplb -->
+
+- **NIXL**：bump 1.5.0（`cbe1f9740d` #56907）；per-region replicate flags 按各 region block 数尺寸化（`2537629eb2` #60107）；本地失效 pull peer 元数据恢复（`9465e1c783` #55471）；混合内存本地注册返回 NumPy descriptors（`0e8f8ecba8` #60108）；TP handshake 测试修复（`48eb44b719` #60157）；Rubin 镜像从源码构建 NIXL EP（`4ac5a36a8e` #60090）。
+- **KV offload**：KVCR 经 secondary-tier factory 恢复构造（`08567505b0` #58088）；KVCR adapter 迁 pool-and-index API（`17c70c8953` #59899）；SimpleCPU 尊重 speculative cacheability（`25385102fe` #60071）。
+- **DP/EP**：每 DP engine 独立全局 RNG streams（`d09ff77637` #59788）；DP world-group 端口 bind 时经 coordination store 选定（`caff2b44cb` #51018）；EPLB torch P2P 传输用 group-local ranks（`15c1cc12ac` #55804）；NCCL symmetric reduce-scatter 消除 staging（`4a99ca40d6` #49194）；ep_gather 输出 offset 拓宽到 int64（`283d76d56a` #58373）。
+- **平台**：BackendEnum 动态注册（`a4b14e57b6` #41091）。

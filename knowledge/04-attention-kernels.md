@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`7a7283a0a2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 
@@ -49,7 +49,7 @@ v1 的 attention 抽象位于 `vllm/v1/attention/`，核心是"一个 backend = 
   - SM120：`TRITON_MLA → FLASHINFER_MLA_SPARSE_SM120`
   - 其他：`FLASH_ATTN_MLA → FLASHMLA → FLASHINFER_MLA → TRITON_MLA → FLASH_ATTN_MLA_SPARSE → FLASHMLA_SPARSE`
 
-**ROCm 平台**（`vllm/platforms/rocm.py:473`）：非 MLA 为 `ROCM_ATTN → ROCM_AITER_FA → ROCM_AITER_UNIFIED_ATTN → TRITON_ATTN → TURBOQUANT`；MLA 为 `ROCM_AITER_MLA → TRITON_MLA → ROCM_AITER_TRITON_MLA`（sparse 用 `ROCM_AITER_MLA_SPARSE`）。
+**ROCm 平台**（`vllm/platforms/rocm.py:474`）：非 MLA 为 `ROCM_ATTN → ROCM_AITER_FA → ROCM_AITER_UNIFIED_ATTN → TRITON_ATTN → TURBOQUANT`；MLA 为 `ROCM_AITER_MLA → TRITON_MLA → ROCM_AITER_TRITON_MLA`（sparse 用 `ROCM_AITER_MLA_SPARSE`）。
 
 **CPU 平台**（`vllm/platforms/cpu.py:138`）：MLA 优先 `AMX_MLA`（x86 + AMX tile 支持），否则 `CPU_MLA`；非 MLA 用 `CPU_ATTN`。
 
@@ -241,7 +241,7 @@ Triton kernel 分布在三处：
 ### 7.3 相关环境变量（`vllm/envs.py`）
 <!-- tags: env-vars, 环境变量, kv-layout, flashinfer, rocm -->
 
-- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1855`）。
+- `VLLM_KV_CACHE_LAYOUT`（`NHD`/`HND`）— KV cache 物理布局（`envs.py:1856`）。
 - `VLLM_BATCH_INVARIANT` — 批不变模式（影响 backend 选择，如 FlexAttention 默认 block 16；MLA/Mamba 需支持 batch invariance）。
 - `VLLM_USE_FLASHINFER_SAMPLER`（默认 True）— 采样用 FlashInfer。
 - `VLLM_USE_FLASHINFER_MOE_INT4` — FlashInfer INT4 MoE。
@@ -293,3 +293,35 @@ Triton kernel 分布在三处：
 - `csrc/libtorch_stable/{pos_encoding_kernels,layernorm_kernels,layernorm_quant_kernels,activation_kernels,sampler,topk}.cu`。
 - `csrc/attention/`（FasterTransformer 移植的通用 paged-attention 模板）、`csrc/rocm/attention.cu`。
 - `vllm/vllm_flash_attn/flash_attn_interface.py` — FA2/3/4 封装。
+
+## 9. 2026-10-04 基线新增
+<!-- tags: glm5.3, mla, mxfp4, nvfp4, split-k, kda, 基线新增 -->
+
+- **GLM-5.3 性能**：fused multi-step decode（#57443，并发 1 E2E +13.3%）；sparse MLA index 转换跨层复用（#59464，kernel 3.5~3.9x）；ROCm AITER topk decode backend（#58167）+ ragged sparse MLA 后冗余 copy 移除（#58569）+ AITER MLA page-index 展开按 token chunk 并行（#57978）+ AITER MLA FP8 prefill 调度元数据竞态修复（#58887）。
+- **MiniMax-M3**：MSA 稀疏注意力路径 NVFP4 KV cache（#59300）；Triton indexer scorer 保留原生 FP8 MMA（#59481）。
+- **Kimi-K3**：FlashInfer 投机 KDA backend（#54255）；ROCm prefill checkpoint 启用（#58344）；gfx942 MXFP4→int4 转换 opt-in（#51274）；KDA warmup 按 `sys.modules` 门控（#59257）；Triton kernel 从 `make_block_ptr` 迁移（#58769）。
+- **SM120 占用率自适应 Triton split-K segment 数（#58482）**。
+- **Qwen3.8-Flash-Next**：主 QK-norm/RoPE/gate 与 KV cache 写入融合进 QSA pre-indexer launch（#57097）。
+- **flash-maxsim late-interaction Triton kernel（#40337）**：`v1/pool/flash_maxsim/`。
+- **watermarking**：CUDA graphs 下 draft prompt 长度保持有效（#59779）。
+
+## 10. 2026-10-06 基线新增
+<!-- tags: 基线更新, qsa, int4_per_token_head, flashinfer -->
+
+- **Qwen4Exp QSA**：QKVG 与 indexer QK 投影合并（`042ab0305c` #59533）
+- **int4_per_token_head**：支持非 2 幂 head size（`e8a53a55e6` #56198）
+- **FlashInfer**：all_reduce backend 选择修复（`ce49174247` #56891）
+## 2026-10-07 基线新增（`30d4032363`）
+<!-- tags: 基线更新, mla, fp8_ds_mla, kv_cache, nope512, sm90 -->
+
+- **MLA fp8_ds_mla KV cache 支持 NoPE-512 模型（SM90）**（`ff53f32409` / #59246，5 文件 +82/-44）：SM90 上 NoPE-512 模型的 fp8_ds_mla KV cache 支持。
+
+## 2026-10-07 基线新增（`458ba2edf8`，续）
+<!-- tags: 基线更新, nvfp4, kv_cache, flashinfer, hisparse, ultraquant, glm -->
+
+- **KV cache 新格式**：NVFP4 KV cache 支持 SM8x/SM12x + FlashInfer（`554340f3d3` #46963）；UltraQuant 4-bit KV cache backend（FlyDSL D=256，`385d86a6cf` #57057）；FP8 KV cache 扩到 Triton DiffKV/MiMo-V2.6-Flash（`21d93d0d8c` #58128）；**GLM 默认切 fp8 KV cache，E2E 吞吐 +2.3%~5.5%**（`fba31f31a9` #60140）；GlmMoeDsa fp8 KV 默认限 SM100（`a982c81e3e` #60281）。
+- **FlashInfer**：autotune 缓存按 rank 持久化，修复 rank-0-only cache-hit 死锁（`3403e0f176` #57635）；warmup autotune M 向上取整修复 MXFP8 split-K 崩溃（`fba462e008` #58165）；sparse MLA FULL graphs 限 decode（`30ab428235` #59751）。
+- **HiSparse**：per-request residency 缓存，不再每步重扫页（`e82b80099a` #60083）；启动期拒绝 cudagraph_mode=FULL（`54d93af9fb` #59688）；steady-state 并发/host-tier 利用率指标（`2e3154aa18` #58949）。
+- **MLA/DSpark**：DSpark non-causal 能力限 builder 层（`9367d8b969` #57992）；Kimi-K3 DSpark MLA KV cache spec 声明 max_tp_shards（`1fbbfa1657` #59733）；flashMLA sparse Q heads pad 到 64 而非 128（`e43db1f5e2` #60029）。
+- **ROCm**：GLM-5.3-Flash BF16 splitk sparse MLA decode（`87d9996abe` #58584）；MLA dual RMSNorm + FP8 group quant 融合（DSv4/R1，`29f955cce0` #54857）；ROCm_SEGMENTED_ATTN backend 跨 RDNA3/3.5/4（`edfccc9469` #59132）；MLA 派生权重 weight reload 保持原位（`9dba339d07` #60389）；DSv4.1 prefill combine 换 shared combine_topk_swa_indices kernel（`fb2ac82458` #56638）。
+- **其他**：Triton attention 保留小 FP8 softmax 权重（`ba77c4c130` #60156）；encoder cudagraph padding 逻辑优化（`8352b2427f` #58925）。

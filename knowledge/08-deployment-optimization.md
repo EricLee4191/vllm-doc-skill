@@ -1,6 +1,6 @@
 # 部署、API 服务与性能调优
 
-> 基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`7a7283a0a2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）。V1 架构为默认且唯一的活跃引擎。所有路径相对于仓库根目录 `/Users/baofeng/baofeng/github/vllm`。
 
 ## 1. 部署形态总览
 <!-- tags: deployment, serve, docker, offline, api-server, 部署 -->
@@ -36,7 +36,7 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct",
 out = llm.generate(["Hello"], SamplingParams(temperature=0.7, max_tokens=128))
 ```
 
-离线与在线共享同一套 `VllmConfig`（`vllm/config/vllm.py:356`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `kv_transfer_config` / `speculative_config` / `observability_config` 等。
+离线与在线共享同一套 `VllmConfig`（`vllm/config/vllm.py:357`）：`model_config` / `cache_config` / `parallel_config` / `scheduler_config` / `compilation_config` / `kv_transfer_config` / `speculative_config` / `observability_config` 等。
 
 **Initialized engine snapshots（v0.30 新增，#51360，实验性）**：`vllm snapshot create/restore` CLI（`vllm/entrypoints/cli/snapshot.py` + `vllm/snapshot/` 包：`runtime.py`/`server.py`/`manifest.py`/`controller.py`）用 **CRIU + CUDA checkpoint** 捕获**已初始化引擎**的整个进程树（含 CUDA 状态），restore 时校验环境指纹（manifest 记录打开的 generated-cache 文件等）并复现记录的 token 输出后才对外服务——把"激活"成本从完整启动降到快照恢复。约束：Linux x86-64 + 单 NVIDIA GPU、**TP1**、单个无鉴权明文 HTTP server（不支持 TLS/middleware/UDS/投机解码）、需 CRIU + CUDA plugin + root、`io_uring` 禁用、模型须为远程 model ID + 40 字符 `--revision`（create 时 `HF_HUB_OFFLINE=1`）。面向**同机反复激活同一模型+配置**的场景，不是可移植模型工件（详见 `docs/features/initialized_snapshots.md`）。2026-09-25 窗口新增 `vllm preload` CLI（#56680）：把模型加载/编译前置为独立步骤，`serve` 启动时直接复用预加载产物，进一步压缩冷启动（与 snapshot 的 CRIU 路线互补：preload 走常规加载路径的产物缓存，不依赖 CRIU/root）。
 
@@ -103,7 +103,7 @@ docker run --rm --gpus all \
 ### 1.4 多机 / 大规模部署
 <!-- tags: multi-node, 多机, ray, dp, pd-disaggregation -->
 
-- 单机多卡默认 `mp`（multiprocessing）executor；跨节点用 `--distributed-executor-backend ray`（`ParallelConfig.distributed_executor_backend`，`vllm/config/parallel.py:261`）。
+- 单机多卡默认 `mp`（multiprocessing）executor；跨节点用 `--distributed-executor-backend ray`（`ParallelConfig.distributed_executor_backend`，`vllm/config/parallel.py:275`）。
 - 多节点 mp 后端：`--nnodes N --node-rank R --master-addr IP`。
 - DP（数据并行）：`--data-parallel-size N`，三种 LB 模式（`docs/serving/data_parallel_deployment.md`）：
   - 内部 LB（单入口，默认）；
@@ -243,7 +243,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 - `max_num_batched_tokens`：单个 engine 迭代最多处理的 token 数（prefill+decode 合计预算）。
 - `max_num_seqs`：单迭代最多并发的序列数。
 
-默认值按硬件自动选择（`EngineArgs.get_batch_defaults`，`vllm/engine/arg_utils.py:2837`）：
+默认值按硬件自动选择（`EngineArgs.get_batch_defaults`，`vllm/engine/arg_utils.py:2873`）：
 
 | GPU | LLM 类 | API server |
 |---|---|---|
@@ -262,7 +262,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.2 显存管理
 <!-- tags: memory, 显存, gpu-memory-utilization, kv-cache, 量化 -->
 
-- `--gpu-memory-utilization`（`CacheConfig.gpu_memory_utilization`，默认 **0.92**，`vllm/config/cache.py:103`）：vLLM 实例占用的显存比例（权重+激活+KV cache）。OOM 时调低，吞吐不够时调高。
+- `--gpu-memory-utilization`（`CacheConfig.gpu_memory_utilization`，默认 **0.92**，`vllm/config/cache.py:102`）：vLLM 实例占用的显存比例（权重+激活+KV cache）。OOM 时调低，吞吐不够时调高。
 - `--kv-cache-memory-bytes`：直接指定每 GPU KV cache 字节数，**设置后忽略 gpu_memory_utilization**，更精细。启动日志会打印建议值（`vllm/v1/worker/gpu_worker.py:730-747`），回灌可跳过 memory profiling 加速启动（文档中写作 `--kv-cache-memory`，代码中 flag 为 `--kv-cache-memory-bytes`）。
 - `--kv-cache-dtype`（`CacheConfig.cache_dtype`）：`auto`/`fp8`/`fp8_e4m3`/`fp8_e5m2`/`nvfp4`/`turboquant_*`/`int8_per_token_head` 等。**FP8 KV cache 使 KV 显存减半、并发翻倍**，精度损失通常可接受（H100/H200/B 系列支持）。
 - 量化权重：`--quantization` 支持 `awq`/`gptq`/`gptq_marlin`/`awq_marlin`/`fp8`/`modelopt`/`modelopt_fp4`/`mxfp8`/`nvfp4`/`compressed-tensors`/`torchao` 等（`vllm/model_executor/layers/quantization/__init__.py:15`，`QuantizationMethods`）。HF 上直接下量化好的 checkpoint 即可（如 RedHatAI 的 FP8 模型）；在线量化用 `fp8_per_tensor`/`fp8_per_block` 等 shorthand。
@@ -283,7 +283,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 ### 4.4 并行策略选择（TP/PP/DP/EP）
 <!-- tags: parallel, 并行策略, tp, pp, dp -->
 
-`ParallelConfig`（`vllm/config/parallel.py:125`）字段：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`prefill_context_parallel_size`、`enable_expert_parallel`、`all2all_backend` 等。
+`ParallelConfig`（`vllm/config/parallel.py:136`）字段：`tensor_parallel_size`、`pipeline_parallel_size`、`data_parallel_size`、`prefill_context_parallel_size`、`enable_expert_parallel`、`all2all_backend` 等。
 
 决策规则（`docs/serving/parallelism_scaling.md`）：
 
@@ -302,7 +302,7 @@ MoE/EP 相关（DeepSeek 类大 MoE 常用）：`VLLM_DEEPEP_BUFFER_SIZE_MB`（1
 
 - `--enforce-eager`：完全禁用 torch.compile 和 cudagraph。启动最快、显存最省，但 decode 性能明显下降。**只在调试/测启动时间/显存紧张时用**。**v0.30.1rc0 区间**：`enforce_eager` 现在还会把 `kernel_config.enable_jit_warmup` 置 False（#58197，`config/vllm.py:1619-1628`），eager 模式不再做 JIT warmup（#55146 门控），进一步缩短启动时间。
 - 默认（`-O2`）：`CompilationMode.VLLM_COMPILE`（Inductor 后端 + piecewise 编译 + 自定义 pass）+ `CUDAGraphMode.FULL_AND_PIECEWISE`（`vllm/config/compilation.py:53`）。cudagraph 消除 decode 的 kernel launch 开销，小 batch 收益最大。
-- `-O0`~`-O3`（`VllmConfig.optimization_level`，默认 O2，`vllm/config/vllm.py:442`）：O0 无优化最快启动；O1 Dynamo+Inductor+PIECEWISE cudagraph；O2 加 FULL_AND_PIECEWISE；O3 目前等同 O2。
+- `-O0`~`-O3`（`VllmConfig.optimization_level`，默认 O2，`vllm/config/vllm.py:443`）：O0 无优化最快启动；O1 Dynamo+Inductor+PIECEWISE cudagraph；O2 加 FULL_AND_PIECEWISE；O3 目前等同 O2。
 - `--compilation-config`（或 `-cc.mode=3`、`-cc.cudagraph_capture_sizes=[1,2,4,8]`）：精细控制。`cudagraph_capture_sizes` 默认到 `max_num_seqs`；显存不够时截断（如 `[1,2,4,8,16]`）。
 - `--performance-mode interactivity`：小 batch 细粒度 capture（1..32 每个都抓），padding 开销最小，延迟最优。
 - 编译缓存：`VLLM_CACHE_ROOT/torch_compile_cache`，跨容器/机器可拷贝；任何模型/配置/相关 `VLLM_*` 环境变量/硬件变化都会使缓存失效（`envs.py:compile_factors()`）。
@@ -359,7 +359,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 ### 4.9 Profiling（torch / CUDA / Proton）
 <!-- tags: profiling, torch-profiler, proton, profile, 性能分析, 火焰图 -->
 
-`ProfilerConfig`（`vllm/config/profiler.py:40`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1842`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:21`）或离线 `LLM.start_profile()/stop_profile()`。
+`ProfilerConfig`（`vllm/config/profiler.py:67`）三种后端：`profiler: "torch" | "cuda" | "proton"`（默认 None 关闭）。CLI：`--profiler-config`（`vllm/engine/arg_utils.py:1854`）；运行时开关：`POST /start_profile`、`POST /stop_profile`（`vllm/entrypoints/serve/profile/api_router.py:35`）或离线 `LLM.start_profile()/stop_profile()`。
 
 - **架构（v0.30.0rc2 统一后）**：profiler 创建/分发收敛在 `vllm/profiler/wrapper.py` 的工厂 `create_worker_profiler`（:675），各 worker（`gpu_worker.py:1323` 等）在 `profile()` 时懒创建 wrapper；平台差异（CUDA/XPU/CPU activity 映射）由 wrapper 内部按 `current_platform` 处理，worker 侧不再各自实现（#57460，此前 `cpu_worker.py`/`xpu_worker.py` 各有一份重复代码）。
 - **`torch_profiler_activities`**（`config/profiler.py:55`）：worker 侧 torch profiler 记录的 activity 列表（`CPU`/`CUDA`/`PrivateUse1`/`XPU`）；缺省时按平台默认（GPU=CPU+CUDA，XPU=CPU+XPU，CPU=CPU）。`delay_iterations`/`max_iterations` + `ignore_frontend=False` 且记录 CPU 时会告警高开销（`config/profiler.py:180` 校验）。
@@ -382,7 +382,7 @@ Prometheus `/metrics` 有 preemption 计数；`--disable-log-stats` 默认关着
 | 调度 | `--max-num-batched-tokens`、`--max-num-seqs`、`--max-num-scheduled-tokens`、`--long-prefill-token-threshold`、`--scheduling-policy`、`--async-scheduling`、`--watermark`、`--stream-interval` | 见 §4.1 |
 | 并行 | `--tensor-parallel-size`、`--pipeline-parallel-size`、`--data-parallel-size`、`--enable-expert-parallel`、`--all2all-backend`、`--distributed-executor-backend`、`--numa-bind` | 1/1/1 |
 | 编译 | `--optimization-level`、`--compilation-config`（`-cc.*`）、`--performance-mode` | O2 / balanced |
-| 投机解码 | `--speculative-config`（method/model/num_speculative_tokens，`vllm/config/speculative.py:388`） | 关 |
+| 投机解码 | `--speculative-config`（method/model/num_speculative_tokens，`vllm/config/speculative.py:387`） | 关 |
 | 结构化输出 | `--structured-outputs-config`（backend: xgrammar/guidance/outlines/lm-format-enforcer） | auto |
 | 可观测 | `--disable-log-stats`、`--otlp-traces-endpoint`、`--collect-detailed-traces`、`--kv-cache-metrics`、`--enable-mfu-metrics` | 关 |
 | 前端 | `--host`、`--port`、`--api-key`、`--api-server-count`、`--allowed-origins`、`--ssl-certfile`、`--root-path`、`--middleware` | 8000 |
@@ -503,3 +503,33 @@ vllm bench sweep serve --serve-cmd "vllm serve M --tensor-parallel-size 4" \
 | `docs/deployment/{docker,k8s,nginx}.md` | 部署 |
 | `docs/benchmarking/{cli,sweeps}.md` | 压测手册 |
 | `examples/basic/`、`examples/deployment/`、`examples/disaggregated/`、`examples/scale_out/` | 可运行示例 |
+
+## 9. 2026-10-04 基线新增
+<!-- tags: frontend, rust, output-mode, json-logging, grpc, 基线新增 -->
+
+- **`/inference/v1/generate` 加 `output_mode`（RFC #56851 Phase 1，#58588）**：`entrypoints/scale_out/token_in_token_out/protocol.py:224` `OutputMode`（默认 tokens），非 tokens 模式要求 `sampling_params.detokenize`（`:302`）。
+- **内置 JSON log formatter（#58739）**：`config/logging.py:31` `formatter: LogFormatter = "text"|"json"`，`--logging-config.formatter json`。
+- **Rust frontend**：`vllm serve` 暴露 gRPC port（#59659）；`hf` response template parser（#59005）；argument grammar 拆 schema 解析与 per-model 渲染（#59395）；structural-tag grammar 快照为可读 outline（#59393）；Kimi K3 token-aware marker 解析（#58358）；pending UTF-8 字节锚定（#58357）；GLM 字符串参数空白保留（#59654）；vllm-bench chat latency 止于最后 token（#59251）；temperature 留默认时 warning（#59247）。
+- **CLI**：`get_attr_docs` 包含继承字段 docstring（#49821）。
+- **空流式输入不触发 generation（#59015）**；derender detokenization 从 prompt 播种（#59046）；复用 prompt token id 先对 vocab 校验再流式（#59555）。
+- **模型初始化时长日志（#52141）**；IR provider 在 config hash 前注册（#58756）。
+
+## 10. 2026-10-06 基线新增
+<!-- tags: 基线更新, sleep_mode, cudagraph_pool, cumem, nccl_graph_register -->
+
+- **sleep 模式释放 CUDA graph 池**（`5e56e9af2a` #59160）：
+  - 新 `vllm/compilation/cudagraph_pool.py`：`capture_pool` contextmanager
+  - `ModelConfig.sleep_mode_offload_cudagraph` + CLI `--sleep-mode-offload-cudagraph`（`config/model.py`/`engine/arg_utils.py`）
+  - `VllmConfig.use_cumem_cudagraph_pool`（`config/vllm.py`）：sleep_mode_offload_cudagraph + enable_sleep_mode + backend=cumem + cudagraph_mode≠NONE + CUDA 平台
+  - 为真时 CUDA graph 捕获分配进 cuMem allocator 的 `cudagraph` tag 池（`device_allocator/cumem.py` `cudagraph_pool()`），sleep 时随权重 offload 一并释放
+  - NCCL graph registration 会 pin 被 offload 的池：自动 `NCCL_GRAPH_REGISTER=0`（已设非 0 时告警）
+  - `breakable_cudagraph.py`/`cuda_graph.py` 捕获路径改用 `capture_pool`；`v1/worker/gpu/cudagraph_utils.py` 同步
+  - 文档：`docs/features/sleep_mode.md` 新增说明
+
+## 11. 2026-10-07 基线新增（`458ba2edf8`）
+<!-- tags: 基线更新, ci, observability, bench, watermark, rng -->
+
+- **可观测性**：cached prompt tokens 按 cache tier 暴露（`e37e51dd24` #56318）；HiSparse steady-state 最大并发 + host-tier 利用率 gauges（`2e3154aa18` #58949）；per-session profiling 控制（`6fddc9b21e` #57875）；JIT monitor hook TileLang JITImpl.compile（`a58bdd0d4e` #58685）。
+- **压测/评估**：vllm-bench 支持 Mooncake 风格 timed-traces replay（`3faf214051` #55937）；gsm8k_eval.py CLI 新增 chat-completion options（`dac35c5b66` #60114）；load balance 测试先 warm DP engines（`4516896626` #60241）。
+- **正确性/杂项**：每 DP engine 独立全局 RNG streams（`d09ff77637` #59788）；watermark 兼容性校验（`c32495d58f` #56801）；pooling chunked embeddings 保留 cache_salt（`0f112d1800` #47696）；CPU fused Gumbel-max wrapping-window bias 修复（`fd0216d3b5` #60221）；DeepSelect 扩展缺失仅在请求时报错（`6b75dfb8a1` #60242）。
+- **CI/构建**：TPU dead in-tree torch_xla CI 脚本移除（`24be8c0bca` #60591）；H100 Distributed DP+EP 改可选（`c4cd88d9fe` #60540）；automatic sharding 纳入五步（`7d47ac2ddb` #60492）；Intel CI 拆分提升 B50 利用率（`032d39e9b4` #58817）；XPU 不支持的量化测试禁用（`9e3e37cb3c` #60383）；ROCm DSv4.1 decoder replay graph 测试重启用（`71f9a74920` #60392）；H200 fast lanes headroom/selection 覆盖（`1283362e76` #56775）；perf-eval 经 Release Pipeline 触发（`13f8c453ee` #52213）；Transformers bump 5.19.0（`a8260cbc5c` #60381）；Python 3.10 EOL 移除（`21d9758459` #60402）。

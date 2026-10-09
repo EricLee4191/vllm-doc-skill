@@ -1,6 +1,6 @@
 # 模型执行与编译优化
 
-> 版本：基于 vLLM main（`df8fd42116`，2026-10-01），最新 tag **v0.31.0rc2**（`7a7283a0a2`，2026-09-29；main 领先其 191 commits；上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 版本：基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的"模型执行层"由三层组成：
@@ -18,13 +18,13 @@ vLLM 的"模型执行层"由三层组成：
 
 v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vllm_config.use_v2_model_runner` 二选一：
 
-- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:185`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，实现收敛在 `gpu/cudagraph_utils.py`：`capture_model` `:988`、`_maybe_ubatch_twin` `:224`，"DBO supports FULL CUDA graphs only" `:160`、"DBO does not support PIECEWISE cudagraphs" `:693`），此前 microbatched 步只能 eager/piecewise。**v0.30.1rc0 区间**：MRV2 支持**独立 draft 模型的投机解码**（#43091，`ef42093a36`，`vllm/v1/worker/gpu/spec_decode/` 下 draft-model proposer）——此前 V2 只支持 EAGLE/MTP 等 head 式 draft；one-token prompt tail 允许 FULL decode graph（#58400，`e7c903609f`）；Mamba/GDN metadata 跨 KV cache group 复用（#58762，`dd3bc9c72f`）；MRV2 支持 stock torch.compile 模式（#59079，`4e59d53ab5`）；Elastic EP 支持 MRV2（#53934，`171d1b9ef6`）；从未被 propose 的 draft slot 被拒绝（#58784，`fedbc3b564`）。
+- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:188`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，实现收敛在 `gpu/cudagraph_utils.py`：`_maybe_ubatch_twin` `:224`，"DBO supports FULL CUDA graphs only" `:164`、"DBO does not support PIECEWISE cudagraphs" `:712`；`capture_model` 在 `gpu/model_runner.py:1035`），此前 microbatched 步只能 eager/piecewise。**v0.30.1rc0 区间**：MRV2 支持**独立 draft 模型的投机解码**（#43091，`ef42093a36`，`vllm/v1/worker/gpu/spec_decode/` 下 draft-model proposer）——此前 V2 只支持 EAGLE/MTP 等 head 式 draft；one-token prompt tail 允许 FULL decode graph（#58400，`e7c903609f`）；Mamba/GDN metadata 跨 KV cache group 复用（#58762，`dd3bc9c72f`）；MRV2 支持 stock torch.compile 模式（#59079，`4e59d53ab5`）；Elastic EP 支持 MRV2（#53934，`171d1b9ef6`）；从未被 propose 的 draft slot 被拒绝（#58784，`fedbc3b564`）。
 - **Model Runner V1（legacy，回退用）**：`vllm/v1/worker/gpu_model_runner.py:479`（约 7700 行）。下文 §1.1/§1.2 的详细行号锚点仍以 V1 为准（V2 的方法名/流程一致，但行号不同）。
 
-`VllmConfig.use_v2_model_runner`（`vllm/config/vllm.py:701`）的判定优先级：
+`VllmConfig.use_v2_model_runner`（`vllm/config/vllm.py:719`）的判定优先级：
 1. 设了 `hisparse_config`（HiSparse）→ **强制 V2**（V1 直接报错）；
 2. 设了 `watermark_config`（水印）→ 强制 V2（覆盖 `=0`）；
-3. 显式 `VLLM_USE_V2_MODEL_RUNNER=0/1`（`vllm/envs.py:303`，默认 `None`）；
+3. 显式 `VLLM_USE_V2_MODEL_RUNNER=0/1`（`vllm/envs.py:306`，默认 `None`）；
 4. ROCm 上命中 `ROCM_DEFAULT_MRV1_ARCHITECTURES` 白名单的架构 → 回退 V1；
 5. 无 Triton → 回退 V1；
 6. `_get_v2_model_runner_unsupported_features()` 命中未支持特性 → 回退 V1；
@@ -371,3 +371,37 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 - **MoE + EP**：`--all2all-backend` 用 `deepep_low_latency`（`deepep_high_throughput` 与 cudagraph 不兼容，会自动降级 `cudagraph_mode=NONE`，见 `compilation.py:1239`）。
 - **首次启动慢**：编译 + capture 通常 5~20s+；用编译缓存（`torch_compile_cache`）与 `kernel_warmup` 缓解。
 - **排障**：`--enforce-eager` 关闭图/编译；`VLLM_LOGGING_LEVEL=DEBUG` 会校验 cudagraph 输入地址一致性。
+
+## 9. 2026-10-04 基线新增
+<!-- tags: transformers-backend, 模型迁移, sleep, workspace, mtp, 基线新增 -->
+
+- **模型迁移到 Transformers modeling backend**：GPT-NeoX/Phi/Seed-OSS/Jais2（#59701）、Glm/Arcee/CWM/Mellum（#59679）——vLLM 原生 modeling 实现删除、走 HF transformers 后端；GLM-5.3 与 Qwen4-Exp 改用上游 config/processor（#57387）；**Transformers < 5.16.1 代码路径整体删除**（#59762）。
+- **sleep 模式资源释放**：KV-init runtime state 在 sleep 时 offload（#59158，XPU 除外——其最外层 pool 会胜出）；`WorkspaceManager` scratch 在 sleep 时释放（#59156，`v1/worker/workspace.py:49`，scratch 无跨 step 状态）。
+- **MRV2 多层 MTP per-module LM heads（#58921）** + **sampling mask replay（#59359）**；DELTA/TITO 流式输出保留 sampling masks（#55935）；routed-experts capture 绑到 MoE 层而非 kernel（#59455）。
+- **性能**：GDN 纯投机解码行切片替代 host-mask gather（#58763）；非投机 GDN decode 保持标准路径（#59735）；PP 跳过离开引擎请求的 sampled-token 广播（#58542）；MoE weighted-sum kernel launch 配置调优（#59731）。
+- **CRIU 快照**：TP1 快照避免 InfiniBand 状态（#59699）；快照清理前记录 CRIU 失败详情（#59661）。
+
+## 10. 2026-10-06 基线新增
+<!-- tags: 基线更新, mamba, moe, qwen4exp, lora, deepseek_v4 -->
+
+- **模型修复/新增**：
+  - Mamba page size AssertionError 修复：GraniteMoeHybrid/FalconH1/Zamba2 在 spec decoding 下（`d0d6e5f3a2` #59975）
+  - 非 gated MoE 加载 stacked expert 权重（`51eeb0c58f` #59031）
+  - Qwen3ASRForConditionalGeneration 声明 SupportsEagle3（`b1f229fb75` #52824）
+  - DeepSeek-V4 MegaMoE shared-expert finalize 独立于 linear post-load 顺序（`4a30c4cad0` #59927）
+- **Qwen4Exp 系列**：QSA attention 尊重 `--kv-cache-dtype-skip-layers`（`4ff028d77e` #60023）；HC up projection 留在 skinny GEMM 路径（`55b80221ed` #60027）；Quark checkpoint 下 PLE 表非量化加载（`edca360f13` #59443）；PLE embedding 接受 INC（AutoRound）checkpoint（`4f52fa35ef` #59990）
+- **LoRA**：确定性 split-K=8 shrink kernel 保 batch invariance（`1388100560` #59377，`lora/ops/triton_ops/lora_shrink_op.py`）；代码清理（`e3af5bf3ce` #60017）
+## 2026-10-07 基线新增（`30d4032363`）
+<!-- tags: 基线更新, glm53, kpool, dcp, lora, tensorizer, kimi, mm_normalization -->
+
+- **GLM-5.3-Flash kpool sparse indexer DCP 支持**（`30d4032363` / #59211，9 文件 +242/-37）：kpool sparse indexer 支持 DCP（distribute checkpoint）。
+- **LoRA 移除 tensorizer**（`f9c9e8ac24` / #60024，9 文件 +30/-375）：LoRA 加载路径移除 tensorizer 依赖（净删 345 行）。
+- **device-side mm normalization 扩到 Kimi K2.5/K3**（`0e468adb43` / #59278，11 文件 +130/-15）：device 侧多模态 normalization 扩展到 Kimi K2.5/K3。
+
+## 2026-10-07 基线新增（`458ba2edf8`，续）
+<!-- tags: 基线更新, mrv2, spec_decode, ngram, mtp, models -->
+
+- **ModelRunner V2 / 投机解码**：NGram GPU 投机解码实现（`819852df6b` #40704）；AR speculators 更名 StandaloneAR/TargetDependentAR（`6ee9be6b3c` #60335）；dynamic K 支持，kernel 提速 1.2~1.3x（`74c5cbcd7b` #57053）；MTP fused multi-step decode 去掉 eager metadata rebuild（`fcf53d240c` #58463）；异构词表 draft 模型留在 MRV1（`ad0f67a7ec` #59541）；NgramGPUSpeculator.propose 接受 num_speculative_tokens（`b6d8e8afd9` #60300）；所有可投机行走 speculative 路径保持 recurrent state 一致（`0eac152707` #56531）。
+- **MRV2 性能**：NonUvaBuffer host-to-device 拷贝避免 stream sync（`956960f85f` #60215）。
+- **模型**：EmbeddingGemma2 多模态 pooling 架构（`02b83919aa` #60254）+ config 解析精简/Triton prefill attention 统一（`b803edbc9f` #60289）；Nemotron 3.5 ASR（`64cb683842` #59827）；LongCat-Flash MLA norms 加载期缩放、去掉 post-load sweep（`31e2443c90` #60080）；DSv4.1 mega-attention wq_b/wo_a 加载期置换（`9a1f6fd4b0` #60064）；Mamba2 internal prefill checkpoints（`e11962fc1c` #57329）；Nemotron Parse lm_head tie 重落地（`775792f2d5` #60272）；Qwen3-Omni interleaved M-RoPE 边界修复（`8c417a2dae` #59842）；Qwen3-VL 未知源 fps 除零修复（`ee406adf0c` #60501）；Qwen4Exp QSA head_dim 从未分片 head 数推导（`d9503dc503` #59945）+ FP8 PLE pinned lookup kernel SM89 以下编译失败修复（`b0b23a48d4` #60142）。
+- **加载/杂项**：`reload_weights` 支持 runai_streamer load format（`c83935b300` #58124）；MTP head 不加载的 checkpoint shard 跳过（`e572e02d21` #60152）；GLM-5.3-Flash DCP top-k merge kernel warmup（`70bdce6133` #60032）。
