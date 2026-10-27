@@ -1,13 +1,13 @@
 # 模型执行与编译优化
 
-> 版本：基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 版本：基于 vLLM main（`503e4e16ad`，2026-10-25），最新 tag **v0.32.1rc0**（`2365177ddd`，2026-10-18；main 领先其 478 commits；上一正式 release 为 v0.32.0，`5df63a7203`，2026-10-17，main 领先其 848 commits；再上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的"模型执行层"由三层组成：
 1. **ModelRunner**——把调度器产出的 `SchedulerOutput` 组织成 forward 输入、执行模型 forward、产出 logits/sampled tokens。**v0.29 起默认是 Model Runner V2**（`vllm/v1/worker/gpu/model_runner.py`，约 2300 行，按功能拆分的重构版）；旧版 V1（`vllm/v1/worker/gpu_model_runner.py`，约 7700 行巨石）仍在，可用 `VLLM_USE_V2_MODEL_RUNNER=0` 回退（见 §1.3）。
 2. **model_executor**（`vllm/model_executor/`）——模型定义、算子层、权重加载、kernel。
 3. **compilation**（`vllm/compilation/`）——torch.compile 集成、piecewise 编译 + CUDA Graph。
-4. **Worker**（`vllm/v1/worker/gpu_worker.py`）——设备初始化、显存 profiling、warmup/capture 的编排入口，按 `vllm_config.use_v2_model_runner` 选 V1/V2 runner（`gpu_worker.py:444`）。
+4. **Worker**（`vllm/v1/worker/gpu_worker.py`）——设备初始化、显存 profiling、warmup/capture 的编排入口，按 `vllm_config.use_v2_model_runner` 选 V1/V2 runner（`gpu_worker.py:206`）。
 
 数据流：`SchedulerOutput → GPUModelRunner.execute_model() → _prepare_inputs() → _model_forward() → compute_logits() → sample_tokens()`。
 
@@ -16,10 +16,10 @@ vLLM 的"模型执行层"由三层组成：
 ## 1. ModelRunner 的职责（GPUModelRunner）
 <!-- tags: modelrunner, gpu-model-runner, execute-model, step, model-runner-v2, mrv2 -->
 
-v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vllm_config.use_v2_model_runner` 二选一：
+v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:206` 按 `vllm_config.use_v2_model_runner` 二选一：
 
-- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:188`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，实现收敛在 `gpu/cudagraph_utils.py`：`_maybe_ubatch_twin` `:224`，"DBO supports FULL CUDA graphs only" `:164`、"DBO does not support PIECEWISE cudagraphs" `:712`；`capture_model` 在 `gpu/model_runner.py:1035`），此前 microbatched 步只能 eager/piecewise。**v0.30.1rc0 区间**：MRV2 支持**独立 draft 模型的投机解码**（#43091，`ef42093a36`，`vllm/v1/worker/gpu/spec_decode/` 下 draft-model proposer）——此前 V2 只支持 EAGLE/MTP 等 head 式 draft；one-token prompt tail 允许 FULL decode graph（#58400，`e7c903609f`）；Mamba/GDN metadata 跨 KV cache group 复用（#58762，`dd3bc9c72f`）；MRV2 支持 stock torch.compile 模式（#59079，`4e59d53ab5`）；Elastic EP 支持 MRV2（#53934，`171d1b9ef6`）；从未被 propose 的 draft slot 被拒绝（#58784，`fedbc3b564`）。
-- **Model Runner V1（legacy，回退用）**：`vllm/v1/worker/gpu_model_runner.py:479`（约 7700 行）。下文 §1.1/§1.2 的详细行号锚点仍以 V1 为准（V2 的方法名/流程一致，但行号不同）。
+- **Model Runner V2（默认）**：`vllm/v1/worker/gpu/model_runner.py:199`（约 2300 行）。把旧版巨石 runner 按功能拆成 `vllm/v1/worker/gpu/` 下的子模块（`input_batch/`、`sample/`、`spec_decode/`、`attn_utils.py`、`cudagraph_utils.py`、`dp_utils.py`、`ubatch_utils.py` 等）。设计原则（见文件头注释）：只放所有模型共享的代码，模型特定行为下沉到 model 文件。**v0.30 新增**：DBO（microbatched）步也支持 **FULL CUDA graph** capture（#51700，实现收敛在 `gpu/cudagraph_utils.py`：`_maybe_ubatch_twin` `:229`，"DBO supports FULL CUDA graphs only" `:169`、"DBO does not support PIECEWISE cudagraphs" `:729`；`capture_model` 在 `gpu/model_runner.py:1079`），此前 microbatched 步只能 eager/piecewise。**v0.30.1rc0 区间**：MRV2 支持**独立 draft 模型的投机解码**（#43091，`ef42093a36`，`vllm/v1/worker/gpu/spec_decode/` 下 draft-model proposer）——此前 V2 只支持 EAGLE/MTP 等 head 式 draft；one-token prompt tail 允许 FULL decode graph（#58400，`e7c903609f`）；Mamba/GDN metadata 跨 KV cache group 复用（#58762，`dd3bc9c72f`）；MRV2 支持 stock torch.compile 模式（#59079，`4e59d53ab5`）；Elastic EP 支持 MRV2（#53934，`171d1b9ef6`）；从未被 propose 的 draft slot 被拒绝（#58784，`fedbc3b564`）。
+- **Model Runner V1（legacy，回退用）**：`vllm/v1/worker/gpu_model_runner.py:475`（约 7700 行）。下文 §1.1/§1.2 的详细行号锚点仍以 V1 为准（V2 的方法名/流程一致，但行号不同）。
 
 `VllmConfig.use_v2_model_runner`（`vllm/config/vllm.py:719`）的判定优先级：
 1. 设了 `hisparse_config`（HiSparse）→ **强制 V2**（V1 直接报错）；
@@ -257,13 +257,13 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 ## 6. Warmup 与显存 profiling
 <!-- tags: warmup, memory-profiling, oom, 显存 -->
 
-入口 `Worker.compile_or_warm_up_model()`（`gpu_worker.py:807`）与 `Worker.determine_available_memory()`（:566）。
+入口 `Worker.compile_or_warm_up_model()`（`gpu_worker.py:927`）与 `Worker.determine_available_memory()`（:641）。
 
 ### 6.1 显存 profiling（`determine_available_memory`）
 <!-- tags: memory-profiling, 显存, profile-run, cudagraph-estimate, available-memory -->
 
 1. 若设了 `kv_cache_memory_bytes`：跳过 profiling，直接返回该值。
-2. 否则 `memory_profiling(...)`（`utils/mem_utils.py:230`）上下文里跑 `model_runner.profile_run()`（`gpu_model_runner.py:6408`）：
+2. 否则 `memory_profiling(...)`（`utils/mem_utils.py:230`）上下文里跑 `model_runner.profile_run()`（`gpu_model_runner.py:6072`）：
    - `profile_run` 用 `max_num_batched_tokens` 的 dummy batch 跑一次 forward（含 MM encoder profiling），触发编译 + 峰值激活。
    - `memory_profiling` 用 `torch.accelerator.get_memory_info` 与 peak stats 区分三类内存：非 vLLM / torch / 非 torch，算出 `non_kv_cache_memory`、`transient_peak_headroom`、`total_consumed`。
 2.5 若启用 cudagraph：`profile_cudagraph_memory()`（:6775）用临时 pool 真实 capture 前 2 个最大 shape，估算 `first_capture + (N-1)*per_graph`，得 `cudagraph_memory_estimate`（受 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS` 控制，默认开）。
@@ -405,3 +405,19 @@ v0.29 起 GPU 上有**两个** ModelRunner 实现，`gpu_worker.py:444` 按 `vll
 - **MRV2 性能**：NonUvaBuffer host-to-device 拷贝避免 stream sync（`956960f85f` #60215）。
 - **模型**：EmbeddingGemma2 多模态 pooling 架构（`02b83919aa` #60254）+ config 解析精简/Triton prefill attention 统一（`b803edbc9f` #60289）；Nemotron 3.5 ASR（`64cb683842` #59827）；LongCat-Flash MLA norms 加载期缩放、去掉 post-load sweep（`31e2443c90` #60080）；DSv4.1 mega-attention wq_b/wo_a 加载期置换（`9a1f6fd4b0` #60064）；Mamba2 internal prefill checkpoints（`e11962fc1c` #57329）；Nemotron Parse lm_head tie 重落地（`775792f2d5` #60272）；Qwen3-Omni interleaved M-RoPE 边界修复（`8c417a2dae` #59842）；Qwen3-VL 未知源 fps 除零修复（`ee406adf0c` #60501）；Qwen4Exp QSA head_dim 从未分片 head 数推导（`d9503dc503` #59945）+ FP8 PLE pinned lookup kernel SM89 以下编译失败修复（`b0b23a48d4` #60142）。
 - **加载/杂项**：`reload_weights` 支持 runai_streamer load format（`c83935b300` #58124）；MTP head 不加载的 checkpoint shard 跳过（`e572e02d21` #60152）；GLM-5.3-Flash DCP top-k merge kernel warmup（`70bdce6133` #60032）。
+## 2026-10-17 基线新增（`523d74e2ac`）
+<!-- tags: 基线更新, lora, sm90, triton, num_stages, ptxas, kimi-k3, warmup -->
+
+- **LoRA `lora_expand` SM90 NaN 修复（`523d74e2ac` #61906，`vllm/lora/ops/triton_ops/lora_expand_op.py`）**：fp32 输入路径（`CAST_TYPE=True`）下，pipelined wgmma 使用 register A operand 在 ptxas < 13.3 的 SM90 上被错误编译（triton-lang/triton#9433），输出垃圾/NaN；修复为 CUDA 且 device capability 90 时强制 `NUM_STAGES = 1`（禁用多 stage 流水）。
+- **Kimi-K3 ROCm KDA warmup 扩展（`28e92eeff2` #59552）**：`vllm/model_executor/warmup/kimi_k3_triton_warmup.py` 的 `kernel_warmup()` 消费 `get_gluon_chunk_kda_warmup_profiles()`（`vllm/models/kimi_k3/amd/ops/kda_prefill.py:29`，(1,64)…(16,64)、(1,4096)、(2,2048)）预热 AITER Gluon `chunk_kda` prefill kernel；`chunk_kda_prefill` 的 `use_fused_chunk: bool` 参数改为 `backend: str = "triton"`（gluon 需 `rocm_aiter_ops.is_kda_gluon_prefill_available()`，CDNA4+）。
+
+## 2026-10-25 基线新增（`503e4e16ad`）
+<!-- tags: 基线更新, mrv2, dbo, pcp, new-models, dory, step5, gemma4 -->
+
+- **MRV2（Model Runner V2）**：本区间 DBO（microbatched）路径继续加固——`vllm/v1/worker/gpu/model_runner.py:199` `GPUModelRunner` 的 ubatch 调度与 `gpu/cudagraph_utils.py` 的 FULL graph capture 交互修复（ubatch 边界与 cudagraph replay 的输入拷贝时序）；PCP（pipeline context parallel）管理器 `PCPManager`（`vllm/v1/worker/gpu/pcp_manager.py:52`）在 MRV2 下完成 prefill 段间流水的剩余修复。
+- **Spec decode（MRV2 侧）**：`RejectionSampler`（`vllm/v1/worker/gpu/spec_decode/rejection_sampler.py:147`）的 `_verify`（`:250`）/`_verify_in_chunks`（`:298`）本区间修复了 vocab 分片（DP-attention / 大词表）下的 chunk 边界；`rejection_sampler_utils.py:1085` `rejection_sample` kernel 的 logsumexp 数值稳定性修复。自适应验证（#58466）与 FLy/XPress 详见 07 §14。
+- **新模型**：
+  - **Dory**（`75fc05a53a` #60149，`vllm/model_executor/models/dory.py`）：NVIDIA normalized latent recurrent transformer，`DoryForCausalLM`（`dory.py:283`）。
+  - **Step-5 Preview**、**Muse Spark Open**、**Domyn Edge**、**Reflection Beam**、**Alpamayo 2 Super**、**Recursive Flint**、**Nemotron Parse 3.5**、**MiniCPM-OCR**、**ColUltraVBERT**：本区间陆续合入的模型支持（`vllm/model_executor/models/` 下新文件 + registry 注册）。
+  - **Gemma4 家族**：`EmbeddingGemma2`/`DiffusionGemma` 借用 `Gemma4ForConditionalGeneration._get_max_soft_tokens`（`embedding_gemma2.py:1015`、`diffusion_gemma.py:289`，#63538）。
+- **编译/warmup**：Triton/Inductor 路径的若干 kernel 选择与 warmup 修复（SM90 wgmma 相关，#61906 的后续）；ROCm 侧 Kimi-K3/MiniMax-M3 的 AITER kernel warmup 扩展（与 06 篇量化章节交叉）。

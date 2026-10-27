@@ -1,6 +1,6 @@
 # 量化与多硬件平台
 
-> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
+> 基于 vLLM main（`503e4e16ad`，2026-10-25），最新 tag **v0.32.1rc0**（`2365177ddd`，2026-10-18；main 领先其 478 commits；上一正式 release 为 v0.32.0，`5df63a7203`，2026-10-17，main 领先其 848 commits；再上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02）（v1 引擎为默认 active engine）。本文聚焦**架构**与**部署/调优**，不逐行注释。
 > 路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 vLLM 的量化体系分两条主线：
@@ -15,7 +15,7 @@ vLLM 的量化体系分两条主线：
 ### 1.1 方法注册表
 <!-- tags: registry, 注册表, quantization-methods, get-config, oot -->
 
-所有方法名定义在 `vllm/model_executor/layers/quantization/__init__.py:15` 的 `QuantizationMethods` Literal 中，`get_quantization_config(name)`（:111）做 name → `QuantizationConfig` 类的映射：
+所有方法名定义在 `vllm/model_executor/layers/quantization/__init__.py:15` 的 `QuantizationMethods` Literal 中，`get_quantization_config(name)`（:112）做 name → `QuantizationConfig` 类的映射：
 
 | `--quantization` 值 | Config 类 | 文件 |
 |---|---|---|
@@ -92,7 +92,7 @@ vLLM 的量化体系分两条主线：
   - **v0.30.1rc0 区间**：wNaM 非对称量化（#46528，HEAD commit）——`HummingLinearMethod.apply` 传 `zero_point=getattr(layer, "zero_point", None)`（`humming.py:627`），`compressed_tensors_wNa16.py` 的 `WNA16_ZP_SUPPORTED_TYPES_MAP` 从 {4,8} 扩到 {2,3,4,5,6,7,8}，wNaM（weight-norm, activation-min）带 zero-point 的不对称 checkpoint 不再报错。
 
 **在线量化（online/，`OnlineQuantizationConfig`，min capability 75）**
-- 无需预量化 checkpoint：加载 BF16/FP16 权重时逐层量化。`--quantization` 的 shorthand 在 `vllm/config/quantization.py:192` 的 `_ONLINE_SHORTHANDS`：
+- 无需预量化 checkpoint：加载 BF16/FP16 权重时逐层量化。`--quantization` 的 shorthand 在 `vllm/config/quantization.py:195` 的 `_ONLINE_SHORTHANDS`：
 
 | shorthand | 权重 recipe | 激活 recipe |
 |---|---|---|
@@ -104,12 +104,12 @@ vLLM 的量化体系分两条主线：
 | `int8_per_channel_weight_only` | INT8 per-channel（仅 MoE） | 不量化 |
 | `nvfp4_per_token` | NVFP4（仅 MoE，Blackwell + FlashInfer TRTLLM） | dynamic per-token |
 
-- 细粒度控制：`--quantization-config '{"linear":{"weight":"fp8_per_block_static","activation":"fp8_per_token"},"moe":{...},"ignore":[...]}'`，名字来自 `QUANT_KEY_NAMES`（`config/quantization.py:33`）。`resolve_quantization_config()`（:233）合并 shorthand 与显式 config（显式优先）。
+- 细粒度控制：`--quantization-config '{"linear":{"weight":"fp8_per_block_static","activation":"fp8_per_token"},"moe":{...},"ignore":[...]}'`，名字来自 `QUANT_KEY_NAMES`（`config/quantization.py:36`）。`resolve_quantization_config()`（:241）合并 shorthand 与显式 config（显式优先）。
 - 调度表：`online/base.py:88` 的 `_ONLINE_LINEAR_METHODS` / `_ONLINE_MOE_METHODS` 按 `QuantKey` 分发到具体 method。
 
 **KV cache 量化（与权重量化正交）**
 - `CacheConfig.cache_dtype`（`vllm/config/cache.py:122`，CLI `--kv-cache-dtype`）：`auto` / `fp8` / `fp8_e4m3` / `fp8_e5m2` / `fp8_inc` / `fp8_ds_mla` / `int8_per_token_head` / `fp8_per_token_head` / `int4_per_token_head` / `nvfp4` / `nvfp4_4over6` / `turboquant_k8v4` / `turboquant_4bit_nc` / `turboquant_k3v4_nc` / `turboquant_3bit_nc`。
-- per-tensor scale 从 checkpoint 加载：`BaseKVCacheMethod`（`quantization/kv_cache.py:43`）在 `Attention` 层上注册 `q_scale/k_scale/v_scale/prob_scale`（`KVCacheScaleParameter`，初始 -1.0 哨兵值）；`Fp8KVCacheMethod`、`ModelOptKVCacheMethod` 等继承它。scale 名字映射由 `QuantizationConfig.get_cache_scale_mapper()`（`base_config.py:210`）统一处理（`.kv_scale` → `.attn.k_scale` 等）。
+- per-tensor scale 从 checkpoint 加载：`BaseKVCacheMethod`（`quantization/kv_cache.py:45`）在 `Attention` 层上注册 `q_scale/k_scale/v_scale/prob_scale`（`KVCacheScaleParameter`，初始 -1.0 哨兵值）；`Fp8KVCacheMethod`、`ModelOptKVCacheMethod` 等继承它。scale 名字映射由 `QuantizationConfig.get_cache_scale_mapper()`（`base_config.py:220`）统一处理（`.kv_scale` → `.attn.k_scale` 等）。
 - per-token-head scale（`*_per_token_head`）在 kernel 写 cache 时动态计算，`BaseKVCacheMethod.process_weights_after_loading` 直接置 1.0 并删除参数（`kv_cache.py:76`）。
 - `kv_cache_dtype_skip_layers`（`cache.py:155`）：按层跳过 KV 量化（首尾层保持高精度，`Platform._align_heterogeneous_kv_block_size` 负责 block 对齐）。
 - TurboQuant（`quantization/turboquant/`）：Hadamard 旋转 + Lloyd-Max 标量量化 K、均匀量化 V，3-4 bit KV。
@@ -158,7 +158,7 @@ vLLM 的量化体系分两条主线：
 <!-- tags: platform, 探测, current-platform, 单例, oot -->
 
 - 内置探测函数：`cuda_platform_plugin()`（pynvml 查 GPU 数，排除 cpu build，Jetson 特判）、`rocm_platform_plugin()`（amdsmi）、`xpu_platform_plugin()`（`torch.xpu.is_available()` + xccl）、`cpu_platform_plugin()`（`VLLM_TARGET_DEVICE=="cpu"` 或 cpu build 或 macOS；AMD Zen + AVX-512 + zentorch 时选 `ZenCpuPlatform`）、`tpu_platform_plugin()`（`VLLM_TPU_USING_PATHWAYS` 或 libtpu）。
-- `resolve_current_platform_cls_qualname()`（:233）：`VLLM_TARGET_DEVICE=cpu` 时 CPU 优先；否则跑所有 builtin + OOT 插件（entry point group `PLATFORM_PLUGINS_GROUP`），**只允许一个激活**，否则 RuntimeError；都没有则 `UnspecifiedPlatform`。
+- `resolve_current_platform_cls_qualname()`（:241）：`VLLM_TARGET_DEVICE=cpu` 时 CPU 优先；否则跑所有 builtin + OOT 插件（entry point group `PLATFORM_PLUGINS_GROUP`），**只允许一个激活**，否则 RuntimeError；都没有则 `UnspecifiedPlatform`。
 - `current_platform` 是模块级 lazy 单例（`__getattr__`，:296），首次访问才解析，保证 OOT 插件先加载。
 - OOT 平台通过插件继承 `Platform`，可覆盖 `import_ir_kernels()`、`pre_register_and_update()`（注册自定义量化 config 等）。
 
@@ -206,7 +206,7 @@ vLLM 的量化体系分两条主线：
 - **v0.30 增量**：
   - **XPU fused top-k/top-p sampler kernel**（#57277，`vllm/v1/sample/ops/topk_topp_sampler.py`）：`xpu_sampler_supported()`（`:129`）在 XPU 平台且 `VLLM_XPU_USE_SAMPLER_KERNEL=1`（默认开）时启用 `xpu_sample()`（`:151`）——fused kernel 直接采样，**不做 vocab 排序、不物化概率张量**，统计上等价于 `random_sample`（噪声来自 device 默认 generator，恒随机采样）。限制：请求需要 per-request seed 或 greedy 时不可用。Model Runner V2 的 sampler（`vllm/v1/worker/gpu/sample/sampler.py`）也接入（`use_xpu_sampler` `:92-93`）。
   - **v0.30.1rc0 区间**：EC producer 实例（encoder-only）使用 encoder-only model runner（#59320，`6945d142e5`）。
-  - **`moe_align_block_size` 7-arg 回退**（#57855，`_custom_ops.py:2274`）：XPU CI 上旧版 torch 只支持 7 参数签名，加 fallback。
+  - **`moe_align_block_size` 7-arg 回退**（#57855，`_custom_ops.py:2199`）：XPU CI 上旧版 torch 只支持 7 参数签名，加 fallback。
 - FP8 linear 默认 **W8A16**（weight-only），`--linear-backend xpu` 强制 W8A8，`--linear-backend xpu_woq` 显式 W8A16（`docs/features/quantization/online.md`）。
 - GDN 模型 block_size 需 64 倍数（`update_block_size_for_backend`，:388）。
 
@@ -315,3 +315,23 @@ vLLM 的量化体系分两条主线：
 - **ROCm（23 commits）**：AITER MegaMoEV2 集成 DSv4（`f6e3944e31` #59685）；GLM-5.3-Flash AITER fused shared experts gfx950（`2a54f6b625` #59221）+ BF16 splitk sparse MLA decode（`87d9996abe` #58584）；FlyDSL GDN prefill backend（`548597367e` #57560）；native merge_attn_states gfx942/950（`4ac0179f8a` #60159）；Kimi-K3 AttnRes 输出 + per-token FP8 输入量化融合（`458ba2edf8` #59069）；DSv4.1 压缩 K cache 单遍反量化 + gather-sized grid（`97bd8c74eb` #56720）；bf16x3 router 用 stacked hipBLASLt GEMM（`182247257f` #52668）；W4A16 gfx11 权重/激活 stride padding（`b267fe4881` #56301）；RDNAHybridW4A16 medium-skinny dispatch（`5281e49908` #52619）；MiniMax-M3 kernel 迁 tensor descriptors（`d64a18832b` #59285）；sleep-mode cuMem 映射 host（`5dd4a628dd` #60367）；MLA DCP verify 默认 round-robin asm decode（`2342343746` #59965）；RDNA3 禁用 AITER attention query quantization（`efd001756b` #57750）。
 - **XPU（8 commits）**：Triton fused MoE 调优（`f7f62d1916` #53065）；Mamba SSU tuned configs 新增 2 个 B70 shape（`4cf1307e72` #57565）；boolean-mask 赋值换 `torch.where`（`0004536dd0` #60529）；CI 拆分 Intel jobs 提升 B50 利用率（`032d39e9b4` #58817）。
 - **依赖/构建**：Python 3.10 EOL 移除（`21d9758459` #60402）；Transformers bump 5.19.0（`a8260cbc5c` #60381）；tpu-inference v0.31.0（`aad4579bbe` #60190）；vendored DeepGEMM 迁 TORCH_LIBRARY abi3（`cc73cca9c8` #48962）；LL CuTeDSL BF16 GEMM WAR 移除（`816173ca9d` #60434）。
+## 9. 2026-10-17 基线新增（`523d74e2ac`）
+<!-- tags: 基线更新, rocm, aiter, fusion, rmsnorm, fp8, moe, deepgemm, fp4, sm100, router-gemm, lora, sm90, png -->
+
+- **ROCm AITER 融合：per-tensor 静态量化 + RMSNorm（`cc2e4fecf2` #52831）**：`vllm/compilation/passes/fusion/rocm_aiter_fusion.py` 新增 `AiterRMSNormStaticQuantPattern` 与 `AiterFusedAddRMSNormStaticQuantPattern`，把 `rms_norm`/`fused_add_rms_norm` + aiter 静态 per-tensor FP8 量化（`QuantKey(scale=kStaticTensorScale)`）匹配替换为 aiter `fused_rms_fp8_per_tensor_static_quant` / `fused_add_rms_fp8_per_tensor_static_quant` 算子（`vllm/_aiter_ops.py:1495`，底层 `aiter.ops.triton.fused_fp8_quant`）；静态 scale 作为输入原样透传。
+- **MoE 性能**：
+  - **SM100 FP4 DeepGEMM experts 跳过 padding 工作（`68ebea789a` #59044，`vllm/model_executor/layers/fused_moe/experts/deep_gemm_moe.py`）**：SM100 家族（`is_device_capability_family(100)`）用 psum layout（`deepgemm_moe_permute(use_psum_layout=True)` 返回 `grouped_layout`），SiLU+mul 的 FP8 requant（`silu_mul_per_token_group_quant_fp8_colmajor`）接收 `expert_ends`/`expert_alignment`，只处理各 expert 的实活 token 范围，不再对 padding 行做量化。
+  - **router GEMM 新形状与 BF16 输出（`596e530675` #62042，`vllm/model_executor/layers/fused_moe/router/gate_linear.py`）**：`FP32_SUPPORTED_SHAPES` 新增 `(5120, 256)`（:50）；GB200 上 bf16 输入 + `(256, 5120)` 权重时 FP32 kernel 的 batch 上限从 32 提到 48（8 的倍数）/16（非倍数）；cuteDSL `ll_bf16_gemm` 增加 BF16 输出路径（`vllm/kernels/linear/cute_dsl/ll_bf16.py` 等）。
+- **LoRA SM90 修复（`523d74e2ac` #61906，`vllm/lora/ops/triton_ops/lora_expand_op.py`）**：fp32 输入时 pipelined wgmma + register A operand 在 ptxas < 13.3 的 SM90 上被错误编译（triton-lang/triton#9433）导致 `lora_expand` 输出垃圾/NaN；修复为 CUDA SM90 上强制 `NUM_STAGES = 1`。
+- **多模态：RGB PNG 透明通道（`2268d83bd9` #61986，`vllm/multimodal/image.py`）**：`convert_image_mode` 调整判定顺序——目标为 RGB 且图像带透明通道（palette "P"/"LA" 等）时**先**按 `rgba_background_color` 合成背景再转 RGB，即使 `image.mode == to_mode` 也走透明处理；`ImageMediaIO.convert_image_mode`（`vllm/multimodal/media/image.py`）不再短路 `image.mode == self.image_mode` 的情况，统一走 `convert_image_mode`。
+- **构建**：移除未使用的 `tools/install_deepgemm.sh`（`9eb7fb9157` #61265，DeepGEMM 现由 `cmake/external_projects/deepgemm.cmake` 管理）。
+
+## 10. 2026-10-25 基线新增（`503e4e16ad`）
+<!-- tags: 基线更新, quark, mxfp8, ark, w4a16, rocm, w4a8, cpu-moe, rocm-perf -->
+
+- **Quark MXFP8（`#63125`）**：Quark 量化格式新增 MXFP8（microscaling FP8，E8M0 block scale）支持，权重加载与 GEMM 路径打通（`vllm/model_executor/layers/quantization/quark/`）。
+- **ARK W4A16（`#50396`）**：ARK 4-bit 权重 / 16-bit 激活量化路径的 kernel 与 scale 布局修复。
+- **ROCm W4A8（`#60413`）**：ROCm 平台 W4A8（4-bit 权重 + 8-bit 激活）量化路径扩展，AITER kernel 对接。
+- **CPU MoE（`#62016`）**：CPU 后端 MoE 的 fused kernel 路径修复（`vllm/model_executor/layers/fused_moe/` 下 CPU 分支）。
+- **ROCm/AMD 性能**：Kimi-K3、MiniMax-M3 在 MI355X 上的 AITER kernel 路径继续调优（DSv4.1 MonoKernel、KDA prefill Gluon 路径，与 03/04 篇交叉）；CDNA4 的 FP8 GEMM 与 all2all 后端选择修复。
+- **可插拔 KV cache dtype（#52670）**：平台后端现可通过 `@register_kv_cache_dtype`（`vllm/config/cache.py:111`）注册自定义 `--kv-cache-dtype`（如平台特定 KV 量化），详见 02 §13。

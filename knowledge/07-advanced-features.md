@@ -1,6 +1,6 @@
 # 投机解码与高级推理特性
 
-> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
+> 基于 vLLM main（`503e4e16ad`，2026-10-25），最新 tag **v0.32.1rc0**（`2365177ddd`，2026-10-18；main 领先其 478 commits；上一正式 release 为 v0.32.0，`5df63a7203`，2026-10-17，main 领先其 848 commits；再上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02）（v1 架构）源码分析。路径均相对仓库根 `/Users/baofeng/baofeng/github/vllm`。
 
 本文覆盖 vLLM 的高级特性：**投机解码 (speculative decoding)**、**采样 (sampling)**、**结构化输出 (structured output)**、**LoRA 多适配器**、**多模态 (multimodal)**、**reasoning/思考模型支持**，以及 v0.29 新增的**文本水印 (watermarking)** 与 **Engram/PLE（n-gram 嵌入存储）**。重点讲架构与部署/调优旋钮。
 
@@ -447,3 +447,53 @@ CLI（`vllm/engine/arg_utils.py`）：
 - **前端 API**：Cohere Chat v2 返回 logprobs（`ef014bdf06` #59072）+ 客户端错误返回 4xx（`43b4aaea3e` #60309）；Anthropic count_tokens 应用 output_config/thinking（`1995c0fcd0` #59180）；Responses namespace 别名修复（`ed825aafc0` #59723）；generate 输出 logprobs 用整数 token IDs（`7b665f7a58` #58181）；`LLM.score()` 不再改调用方参数（`2dd887426e` #59959）；batch chat completions 尊重默认 penalties（`d77cf81156` #60307）；max_log_len 未设时记录完整请求体（`db6e3cd8c4` #60310）；GPU-less render server 应用 model-default reasoning parser（`09e0ce3d82` #54835）；`reasoning_ended` 透传 render→generate（`18c8a65edd` #60059）。
 - **稳定性**：ZMQ 端口 TOCTOU 以继承 listener 消除（`f226af0e11` #54113）；`suppress_stdout` 改重定向 fd 1（`e73895a5df` #59336）；per-session profiling 控制（Python + Rust，`6fddc9b21e` #57875）；RL entrypoints 合并（`4187ade7b8` #57849）；`offline_utils.py` 迁 `entrypoints/common`（`459764104d` #58052）。
 - **多模态**：encoder cudagraph padding 逻辑优化（`8352b2427f` #58925）；Qwen3-Omni interleaved M-RoPE 边界修复（`8c417a2dae` #59842）。
+## 13. 2026-10-17 基线新增（`523d74e2ac`）
+<!-- tags: 基线更新, parser, beam, tool-call, reasoning, minimax-m2, streaming, response-template -->
+
+- **Beam reasoning/tool parser（`153a17166e` #62052，27 文件 +4463/-91）**：
+  - 新 `--tool-call-parser beam` / `--reasoning-parser beam`（`vllm/tool_parsers/beam_tool_parser.py`、`vllm/reasoning/beam_reasoning_parser.py`、`vllm/parser/beam.py`，Rust 侧 `rust/src/parser/src/unified/beam.rs`）。Beam checkpoint 用 `response_template` 元数据描述输出格式，`beam` parser 与 `hf` parser 一样读取它，但**额外约束输出**：对 strict tools、required/named tool choice、structured outputs 从模板推导 structural-tag grammar（固定 strict tool 参数、`parallel_tool_calls=false` 时只允许单次调用、structured output 框为 answer）；`tool_choice="none"` 时 grammar 只允许 reasoning + answer。
+  - **always-on grammar**：即使无 strict tool/forced choice/structured output，也把输出约束到模板格式（自由参数 tool call 或 answer）。依赖 `xgrammar` backend（默认），可用 `VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT=0` 关闭（`vllm/envs.py:1850`）。
+  - `ParserManager`（`vllm/parser/parser_manager.py`）重构：response-template parser 不再硬编码 `"hf"`，改为按 `response_template_parser_cls(parser_cls)` 识别任意模板驱动 parser（新 `vllm/parser/response_template.py`/`response_template_grammar.py`，后者 +1000 行实现模板→grammar 推导）；tokenizer 校验 `validate_tokenizer_response_template` 扩展到检查 `response_template` 元数据。
+- **MiniMax M2 tool 参数增量流式（`b088eba944` #62035，`vllm/parser/minimax_m2.py`）**：16 KB tool call 的解析延迟从 5.9 s 降到 26 ms。机制：新 `ArgValueExtender`（`vllm/parser/engine/parser_engine_config.py`）——当 parameter 标签开着的值恰是 raw_args 末尾且为最后一个 JSON 值时，delta 直接追加其 JSON-escaped 文本（`json.dumps(delta)[1:-1]`），只有 delta 触及值结束符（闭合 parameter 标签或下一个 parameter 开标签，`_PARAM_VALUE_END_RE`）才回退全量重解析；裸名（bare name）等可能改变解析结果的形态直接禁用增量路径。
+## 14. 2026-10-25 基线新增（`2f1041e8dd`）
+<!-- tags: 基线更新, spec-decode, fly, xpress, dflash, eagle, adaptive-verification, sampling -->
+
+本区间（528 commits / 2141 文件，+218507/-23996）投机解码方向变化最大：新增两个 draft 体系（**FLy**、**XPress**）、batch-sharded 采样下的自适应验证、EAGLE 显式 draft-layer 标签，以及 DFlash/DSpark 的 prefix-cache 修复。
+
+- **FLy：熵门控延迟验证（新 `vllm/v1/spec_decode/fly.py`）**：
+  - 新拒绝采样方法 `RejectionSampleMethod = Literal["standard", "synthetic", "block", "fly"]`（`vllm/config/speculative.py:83`），FLy 是第 4 种。
+  - 机制：draft 接受/拒绝不再逐 token 即时判定，而是**按窗口延迟验证**——先以 draft 分布采样出整个窗口，再用目标模型对窗口做熵估计，仅当窗口内熵超过阈值（或 top-k 熵超过阈值）时才回退到逐 token 验证；低熵窗口整体接受，省去逐 token 的 target 重采样。
+  - 配置参数（`vllm/config/speculative.py:640-654`）：`fly_window_size`（验证窗口大小）、`fly_entropy_threshold`（默认 **0.3**，nats/单位熵阈值）、`fly_entropy_top_k`（默认 **3**，取 top-k 分布熵）。
+  - 适用场景：draft 与 target 高度一致（低熵）的长生成段，减少 target 侧逐 token 采样开销。
+- **XPress：Jacobi 迭代 draft（#54448，新 `vllm/v1/worker/gpu/spec_decode/xpress/`）**：
+  - 新 speculator 类 `XPressSpeculator(DFlashSpeculator)`（`vllm/v1/worker/gpu/spec_decode/xpress/speculator.py`），复用 DFlash 的 fill-in 布局（anchor slot 0 为已接受 token 锚点，其余 slot 为并行 draft 位置）。
+  - 与 DFlash 单遍 fill-in 不同，XPress 做**多遍 Jacobi 迭代**：`xpress_num_passes`（默认 **6**）遍，每遍用上一遍的 draft token 作为输入重新前向，逐步收敛到更准确的 draft 分布。
+  - `xpress_topc`：top-C 词表打分——只对 draft 分布 top-C 的 token 计算精确 logits，其余截断，降低每遍前向的采样/打分成本。
+  - 架构注册：`XPRESS_ARCHITECTURES = {"Qwen3XPressModel", "DFlashQwen3XPressModel"}`，配套新模型文件 `vllm/model_executor/models/qwen3_xpress.py`（Qwen3 骨干 + XPress draft 头）。
+  - 新 kernel 文件 `vllm/v1/worker/gpu/spec_decode/xpress/kernels.py`（Jacobi 遍间的 token 收集/回填）。
+- **Batch-sharded 采样下的自适应验证（#58466）**：
+  - 当采样按 batch 分片（sharded sampling）执行时，验证步骤改为**自适应**：根据各分片实际接受率动态调整下一轮 draft 长度，避免固定 draft 长度在低接受率场景浪费 target 算力。
+  - 与 FLy 的熵门控互补：FLy 在 token 级门控验证粒度，#58466 在 batch 级门控 draft 长度。
+- **EAGLE 显式 draft-layer 标签（#61455）**：
+  - EAGLE speculator 的 draft 层不再隐式推断，改为**显式标签**：模型配置中可指定哪些层参与 draft 前向，避免在多层 EAGLE 结构中误选层。
+  - 影响 `vllm/v1/spec_decode/eagle.py` 的层选择逻辑与 `vllm/config/speculative.py` 的 EAGLE 配置字段。
+- **DFlash/DSpark prefix-cache block 修复（#54163）**：
+  - 修复 DFlash 与 DSpark 在 prefix cache 命中时的 block 对齐问题：当 prefix cache 返回的 block 边界与 DFlash 的 fill-in 布局不对齐时，此前会错误地复用跨 block 的 KV，导致 draft 质量下降。修复后强制在 block 边界处重新对齐 anchor slot。
+- **其他 spec decode 修复**：
+  - MRV2（Model Runner V2）spec decode 路径的若干 bugfix（draft token 收集、accept 长度统计）。
+  - `vllm/v1/spec_decode/` 下 `__init__.py` 导出更新，注册 FLy 与 XPress 到 speculator 工厂。
+
+### 14.1 追加：`2f1041e8dd` → `503e4e16ad`（6 commits，2026-10-25）
+<!-- tags: 基线更新, kv-offload, backpressure, dory, gemma4, nixl-telemetry -->
+
+- **KV Offload 分层（tiering）三项加固**（本区间无 spec decode 新特性，改动集中在 KV Offload）：
+  - **异步 lookup 迭代器异常兜底（`503e4e16ad` #63126，`vllm/v1/kv_offload/tiering/async_lookup.py`）**：`AsyncLookupManager`（`async_lookup.py:70`）的轮询循环里，`self.batch_lookup(keys, req_context)` 返回的是**惰性迭代器**，异常在迭代时才抛出——此前会穿透轮询线程导致 lookup 循环崩溃。修复：`hits: Iterable[bool] = list(self.batch_lookup(keys, req_context))`（`async_lookup.py:275` 附近）先物化，`except Exception` 时降级为全 miss（`hits = (False for _ in keys)`）并 warning，保证单 tier 的 lookup 故障不影响其他请求。
+  - **OBJ tier 启用 NIXL telemetry（`4a81a50976` #55576，`vllm/v1/kv_offload/tiering/obj/manager.py:158`）**：OBJ（对象存储）tier 的 NIXL agent 创建改为 `nixl_agent_config(backends=[], capture_telemetry=True)`——此前 OBJ tier 的 NIXL 传输无 telemetry 数据，分层 offload 的传输指标（bytes/latency）在 obj tier 上缺失，影响 back-pressure 与监控。
+  - **二级 tier 存储失败计入 back-pressure（`2b1f75c80f` #61780，`vllm/v1/kv_offload/tiering/backpressure.py`）**：
+    - `BackpressureDetector` 基类新增 `on_store_failed()`（`backpressure.py:135`，默认忽略）；`TieringOffloadingManager` 的完成回调（`vllm/v1/kv_offload/tiering/manager.py:574`）在 store job `success=False` 时调用它。
+    - `EMABackpressureDetector`（`backpressure.py:189`）实现：连续失败达到 `DEFAULT_FAILURE_THRESHOLD = 3`（`backpressure.py:242`）即强制进入 pressure——把 EMA 直接抬到 `max(ema, high * _FAILURE_EMA_FACTOR)`（`_FAILURE_EMA_FACTOR = 4.0`，`backpressure.py:247`），并置 `_failure_tripped`。
+    - 失败阈值只对**存储型 tier** 生效：`_STORAGE_TIER_TYPES = frozenset({"fs", "obj"})`（`backpressure.py:256`），`default_config` 仅对 fs/obj tier 注入 `failure_threshold`（`backpressure.py:271-272`）。
+    - 语义：慢（latency 超水位）与**失败**是两类压力信号——此前只有慢会触发 ThrottledDropPolicy 的丢弃/限流，二级 tier（fs/obj）连续写失败时主 tier 仍持续下发 store，造成无谓的失败重试与日志风暴。失败触发的 pressure 同样受 idle decay 约束：探测 store 成功即重置失败计数。
+- **新模型 Dory（`75fc05a53a` #60149，新 `vllm/model_executor/models/dory.py`）**：NVIDIA 的 "normalized latent recurrent transformer"。结构：`DoryAttention`（`dory.py:54`）→ `DoryMLP`（`dory.py:165`）→ `DoryDecoderLayer`（`dory.py:200`）→ `DoryBackbone`（`dory.py:233`）→ `DoryForCausalLM`（`dory.py:283`）。
+- **Gemma4 `_get_max_soft_tokens` 借用（`b70de52965` #63538）**：`EmbeddingGemma2` 与 `DiffusionGemma` 的 `_get_max_soft_tokens` 改为直接借用 `Gemma4ForConditionalGeneration._get_max_soft_tokens`（`vllm/model_executor/models/embedding_gemma2.py:1015`、`vllm/model_executor/models/diffusion_gemma.py:289`），消除三份重复实现，soft-token 上限逻辑以 Gemma4 为唯一权威。
+- **CI-only（`24324ef0f6` #63537）**：Qwen2 embed 内存泄漏与 HfRunner no-cache logprobs 的测试修复，不影响运行时行为。

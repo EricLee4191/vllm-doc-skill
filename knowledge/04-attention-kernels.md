@@ -1,6 +1,6 @@
 # Attention 后端与底层算子
 
-> 基于 vLLM main（`458ba2edf8`，2026-10-07），最新 tag **v0.31.1rc0**（`e37e51dd24`，2026-10-06；main 领先其 116 commits；上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02，main 领先其 582 commits；再上一正式 release 为 v0.30.0，`9ed533eb4a`，2026-09-20）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
+> 基于 vLLM main（`503e4e16ad`，2026-10-25），最新 tag **v0.32.1rc0**（`2365177ddd`，2026-10-18；main 领先其 478 commits；上一正式 release 为 v0.32.0，`5df63a7203`，2026-10-17，main 领先其 848 commits；再上一正式 release 为 v0.31.0，`db9527a468`，2026-10-02）（v1 引擎）源码。本文聚焦 **架构** 与 **部署/调优**：attention backend 的抽象与选择机制、各 backend 的适用场景、vLLM 自研/集成的 CUDA kernel、Triton kernel 用途，以及切换 backend 的旋钮。
 
 ---
 
@@ -15,7 +15,7 @@ v1 的 attention 抽象位于 `vllm/v1/attention/`，核心是"一个 backend = 
 | `AttentionMetadataBuilder` (ABC, Generic) | 每个 step 由 scheduler 产出的 `CommonAttentionMetadata` 构建出 backend 专属的 metadata（`build()`）。关键类属性：`_cudagraph_support`（`AttentionCGSupport` 枚举：`ALWAYS` / `UNIFORM_BATCH` / `UNIFORM_SINGLE_TOKEN_DECODE` / `NEVER`）、`reorder_batch_threshold`（是否把 decode 重排到 batch 前部）。 |
 | `AttentionImpl` / `MLAAttentionImpl` (ABC) | 真正执行 attention 的 forward。标准 attention 用 `AttentionImpl.forward(layer, q, k, v, kv_cache, attn_metadata, output, ...)`；MLA 用 `MLAAttentionImpl.forward_mha()`（prefill，compute-friendly）+ `forward_mqa()`（decode，data-movement-friendly）。 |
 
-`CommonAttentionMetadata`（`backend.py:384`）是跨 backend 共享的 per-batch 元数据，关键字段：`query_start_loc`（GPU+CPU 双份）、`seq_lens`、`num_actual_tokens`、`max_query_len`、`max_seq_len`、`block_table_tensor`、`slot_mapping`、`causal`（可为 bool 或 per-seq tensor，FA4 支持 per-seq causal）、`is_prefilling`、`mm_req_doc_ranges`（PrefixLM 双向区间）、`rswa_prefix_lens`（Reference Sliding Window Attention）。
+`CommonAttentionMetadata`（`backend.py:390`）是跨 backend 共享的 per-batch 元数据，关键字段：`query_start_loc`（GPU+CPU 双份）、`seq_lens`、`num_actual_tokens`、`max_query_len`、`max_seq_len`、`block_table_tensor`、`slot_mapping`、`causal`（可为 bool 或 per-seq tensor，FA4 支持 per-seq causal）、`is_prefilling`、`mm_req_doc_ranges`（PrefixLM 双向区间）、`rswa_prefix_lens`（Reference Sliding Window Attention）。
 
 **KV cache 布局**：backend 通过 `get_kv_cache_shape()` 给出逻辑 shape，通过 `get_kv_cache_stride_order()` 给出物理维度排列。标准 MHA 逻辑 shape 为 `(num_blocks, num_kv_heads, block_size, 2*head_size)`（K/V 打包进 content 维），物理布局由 `VLLM_KV_CACHE_LAYOUT` 决定。**v0.29 起**布局统一抽象成 `KVCacheLayout` 枚举（`vllm/v1/kv_cache_layout.py`，逻辑 shape 恒为 `[L,B,H,N,C]`，每个取值是一个 stride 置换），`VLLM_KV_CACHE_LAYOUT` 取值从旧的 `NHD`/`HND` 扩展为 `LBNHC/LBHNC/LHBNC/NHD/HND/BLHNC/BLNHC/BHLNC`（`NHD`/`HND` 为兼容旧名）。backend 的 `validate_configuration` 据 `is_layer_compact`/`is_block_contiguous` 等属性判断能否实现（见 02 §5.1）。MLA 的 cache 是 latent 布局（`num_kv_heads` 恒为 1，content 维 = `kv_lora_rank + qk_rope_head_dim`）。
 
@@ -71,9 +71,9 @@ v1 的 attention 抽象位于 `vllm/v1/attention/`，核心是"一个 backend = 
 
 v1 的 scheduler 把每个 step 的 batch 拆成 **prefill 段**（query_len > 1）与 **decode 段**（query_len == 1，或 spec-decode 的 1+draft）。不同 backend 处理这两段的方式不同：
 
-- **FLASH_ATTN**：统一走 `flash_attn_varlen_func`（`flash_attn.py:1504`），prefill 与 decode 用同一个 varlen kernel，靠 `cu_seqlens_q`/`seqused_k`/`block_table` 区分。KV cache 逻辑 shape `(B, H, N, 2*D)`，forward 里 `kv_cache.transpose(1,2).split(head_size)` 拆出 K/V。支持 cascade attention（`use_cascade` 分支）。
-- **FLASHINFER**：`FlashInferMetadata` 显式分 `prefill`（`FIPrefill`/`TRTLLMPrefill`）与 `decode`（`FIDecode`/`FlashInferTrtllmAPIDecode`）两个 wrapper（`flashinfer.py:642`）。decode kernel 由 `FlashInferDecodeKernel` 枚举选择：`XQA`（SM90）或 `TRTLLM_GEN`（SM100 trtllm-gen）。prefill 可选 TRTLLM ragged kernel。这是"prefill/decode 分路"最典型的 backend。**v0.30.1rc0 区间**：FlashInfer 升级 0.7.0.post1（#59323，`678baf5372`）；FlashInfer trtllm-gen 启用 fused multi-step draft decode（#58371，`35d6fb3187`）。
-- **TRITON_ATTN**：默认走 `unified_attention`（`triton_attn.py:663`，`vllm/v1/attention/ops/triton_unified_attention.py` 的 `kernel_unified_attention`），单 kernel 同时处理 prefill+decode；`AttentionConfig.use_prefill_decode_attention=True` 时改用分离的 `context_attention_fwd`（prefill）+ decode kernel。
+- **FLASH_ATTN**：统一走 `flash_attn_varlen_func`（`flash_attn.py:1489`），prefill 与 decode 用同一个 varlen kernel，靠 `cu_seqlens_q`/`seqused_k`/`block_table` 区分。KV cache 逻辑 shape `(B, H, N, 2*D)`，forward 里 `kv_cache.transpose(1,2).split(head_size)` 拆出 K/V。支持 cascade attention（`use_cascade` 分支）。
+- **FLASHINFER**：`FlashInferMetadata` 显式分 `prefill`（`FIPrefill`/`TRTLLMPrefill`）与 `decode`（`FIDecode`/`FlashInferTrtllmAPIDecode`）两个 wrapper（`flashinfer.py:804`）。decode kernel 由 `FlashInferDecodeKernel` 枚举选择：`XQA`（SM90）或 `TRTLLM_GEN`（SM100 trtllm-gen）。prefill 可选 TRTLLM ragged kernel。这是"prefill/decode 分路"最典型的 backend。**v0.30.1rc0 区间**：FlashInfer 升级 0.7.0.post1（#59323，`678baf5372`）；FlashInfer trtllm-gen 启用 fused multi-step draft decode（#58371，`35d6fb3187`）。
+- **TRITON_ATTN**：默认走 `unified_attention`（`triton_attn.py:697`，`vllm/v1/attention/ops/triton_unified_attention.py` 的 `kernel_unified_attention`），单 kernel 同时处理 prefill+decode；`AttentionConfig.use_prefill_decode_attention=True` 时改用分离的 `context_attention_fwd`（prefill）+ decode kernel。
 - **MLA**：`MLAAttention.forward_impl`（`mla_attention.py:893`）按 `num_mqa_tokens`（decode）/`num_mha_tokens`（prefill）切分：decode 段调 `impl.forward_mqa()`，prefill 段调 `impl.forward_mha()`（若实现）。prefill 后端由独立的 `MLAPrefillBackendEnum` 选择（见 §4.2）。
 - **SSM/线性注意力（GDN 等）**：`backends/recoverssm_metadata.py` 的 `RecoverSSMMetadata` 抽象负责 spec decode 下 SSM 状态的"回滚/恢复"——`commit_recoverssm_state(num_accepted_tokens)` 按实际接受 token 数产出 `RecoverSSMPostprocessMetadata`（供 align-mode 前缀缓存的 postprocess）。这是混合架构（Gated DeltaNet 等）+ 投机解码的配套机制。
 
@@ -325,3 +325,23 @@ Triton kernel 分布在三处：
 - **MLA/DSpark**：DSpark non-causal 能力限 builder 层（`9367d8b969` #57992）；Kimi-K3 DSpark MLA KV cache spec 声明 max_tp_shards（`1fbbfa1657` #59733）；flashMLA sparse Q heads pad 到 64 而非 128（`e43db1f5e2` #60029）。
 - **ROCm**：GLM-5.3-Flash BF16 splitk sparse MLA decode（`87d9996abe` #58584）；MLA dual RMSNorm + FP8 group quant 融合（DSv4/R1，`29f955cce0` #54857）；ROCm_SEGMENTED_ATTN backend 跨 RDNA3/3.5/4（`edfccc9469` #59132）；MLA 派生权重 weight reload 保持原位（`9dba339d07` #60389）；DSv4.1 prefill combine 换 shared combine_topk_swa_indices kernel（`fb2ac82458` #56638）。
 - **其他**：Triton attention 保留小 FP8 softmax 权重（`ba77c4c130` #60156）；encoder cudagraph padding 逻辑优化（`8352b2427f` #58925）。
+## 2026-10-17 基线新增（`523d74e2ac`）
+<!-- tags: 基线更新, adaptive-verification, varlen, mamba2, kda, dspark, rocm, aiter, mla -->
+
+- **adaptive verification 的 varlen decode 全面铺开**（DSpark 自适应验证：每步实际验证 token 数可变，decode 需按 varlen query 处理）：
+  - **Mamba2**（`3dc6def360` #53036，`vllm/v1/attention/backends/mamba2_attn.py`）：`Mamba2AttentionMetadataBuilder.get_varlen_cudagraph_max_query_len` 返回 `max_decode_query_len(vllm_config)`（`vllm/v1/attention/backend.py:572`），使 Mamba2 decode 支持 varlen CUDA graph；`supports_device_cpu_query_lens_mismatch` 在 `cache_config.use_replayssm` 时返回 False（ReplaySSM 按 CPU 计数规划，decode kernel 取 device offsets，两者不能不一致）。
+  - **ROCm AITER MLA**（`5bf3d9f665` #59824，`vllm/v1/attention/backends/mla/rocm_aiter_mla.py`）：Kimi-K3 在 MI355X 上支持 DSpark adaptive verification——`_adaptive_varlen_verify_enabled` 门控（`speculative_config.enable_adaptive_verification` + `decode_context_parallel_size == 1` + `max_decode_query_len > 1`）；满足时 `AiterMLAMetadataBuilder` 声明 `get_varlen_cudagraph_max_query_len`（且要求 cudagraph support 为 UNIFORM_BATCH），metadata 切到 `QueryLenSupport.VARLEN`，预分配 `max_num_seqs * varlen_decode_qlen` 行的 row→(req, pos) 映射张量（`varlen_q_rows`/`varlen_o_rows`）。
+  - **Kimi-K3 KDA（ROCm）**（同 #59824，`vllm/models/kimi_k3/amd/kda_metadata.py:107`）：`KimiK3ROCmKDAMetadataBuilder.get_varlen_cudagraph_max_query_len` 在 adaptive verification 开启时返回 `max_decode_query_len`。
+  - **rejection sampling 短 draft 跳过 bonus-logit reduction**（`663e535640` #61451，`vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py`）：新增 Triton 谓词 `_is_bonus_logit`（下一位置 `expanded_local_pos == 0` 即 bonus），替代旧的 `draft_step_idx >= num_speculative_steps` 判断——adaptive verification 下 draft 可在 `num_speculative_steps` 前提前结束，bonus 位置不再需要 max/argmax 与指数和归约，短 draft 直接省掉这部分词表级工作。
+- **Kimi-K3 KDA prefill 走 AITER Gluon（`28e92eeff2` #59552）**：`rocm_aiter_ops.is_kda_gluon_prefill_available()`（`vllm/_aiter_ops.py:2621`，CDNA4+ 且 `aiter.ops.triton.attention.chunk_kda` 可导入）与 `kda_chunk_prefill`（:5136）包装 AITER Gluon `chunk_kda`；`vllm/models/kimi_k3/amd/ops/kda_prefill.py` 的 `chunk_kda_prefill` 参数 `use_fused_chunk: bool` 改为 `backend: str = "triton"`（可选 gluon）；warmup 走 `get_gluon_chunk_kda_warmup_profiles()`（(1,64)…(16,64)、(1,4096)、(2,2048) 等 profile，由 `vllm/model_executor/warmup/kimi_k3_triton_warmup.py` 消费）。
+
+## 2026-10-25 基线新增（`503e4e16ad`）
+<!-- tags: 基线更新, mla, flashinfer, trtllm-gen, dcp, cute-dsl, glm-5.3 -->
+
+- **MLA backends**：
+  - **trtllm-gen DCP prefill（`#62029`，`vllm/v1/attention/backends/flashinfer.py`）**：`TrtllmDCPContextWrapper`（`flashinfer.py:324`）与 `BatchDCPPrefillWrapper`（`flashinfer.py:404`）——trtllm-gen prefill kernel 在 decode context parallel（DCP）下的 batch 包装，把 DCP 分片后的 prefill 请求打包成 trtllm-gen 可消费的 batch 布局。
+  - **CuTe DSL MLA（`#62069`）**：基于 NVIDIA CuTe DSL 的新 MLA kernel 路径（`vllm/v1/attention/backends/mla/` 下），作为 FlashMLA/CutlassMLA 之外的第三条 SM90+ 路径，目标是在特定 shape 下超越 CUTLASS 模板。
+  - `CutlassMLABackend`（`mla/cutlass_mla.py:38`）与 `FlashMLASparseBackend`（`mla/flashmla_sparse.py:147`）本区间有 metadata 构建与 sparse index 的若干修复。
+- **FlashInfer 升级 0.7.2.post1**：decode kernel（XQA / TRTLLM_GEN）与 prefill ragged kernel 的兼容性修复；`FlashInferMetadata`（`flashinfer.py:804`）结构不变。
+- **GLM 5.3 `concat_and_cache_mla` scale 跳过（`#62102`）**：GLM 5.3 的 MLA KV 在 `concat_and_cache_mla`（`vllm/_custom_ops.py:2911`）写入时跳过额外的 scale 乘子（该模型的 KV 已在上游完成缩放），避免双重缩放。
+- **adaptive verification varlen decode**（上一基线段已覆盖 Mamba2/ROCm AITER MLA/Kimi-K3 KDA 的 `get_varlen_cudagraph_max_query_len` 铺开）：本区间继续扩展到更多 backend 的 metadata builder，`max_decode_query_len`（`vllm/v1/attention/backend.py:572`）成为 varlen decode cudagraph 的统一上限来源。

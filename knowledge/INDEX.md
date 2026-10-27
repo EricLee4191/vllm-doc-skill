@@ -3,7 +3,7 @@
 > 自动生成，勿手改。重建：`python3 scripts/build_tag_index.py`
 > 检索约定：先在本文件 grep 关键词定位 `文件:行号`，再 Read 对应区间。
 
-共 706 个 tag，覆盖 9 份文档。
+共 758 个 tag，覆盖 9 份文档。
 
 - **5090** → 06-quantization-hardware.md:222
 - **a100** → 06-quantization-hardware.md:222
@@ -13,8 +13,9 @@
 - **activation** → 03-model-execution.md:154, 04-attention-kernels.md:173
 - **actor** → 05-distributed.md:251
 - **adapter** → 07-advanced-features.md:224
+- **adaptive-verification** → 04-attention-kernels.md:329, 07-advanced-features.md:459
 - **aggregator** → 05-distributed.md:323
-- **aiter** → 06-quantization-hardware.md:303, 06-quantization-hardware.md:311
+- **aiter** → 04-attention-kernels.md:329, 06-quantization-hardware.md:303, 06-quantization-hardware.md:311, 06-quantization-hardware.md:319
 - **all-gather** → 05-distributed.md:209
 - **all-reduce** → 05-distributed.md:52, 05-distributed.md:145, 05-distributed.md:188, 05-distributed.md:530
 - **all2all** → 05-distributed.md:78
@@ -26,6 +27,7 @@
 - **api-key** → 08-deployment-optimization.md:198
 - **api-server** → 00-overview.md:23, 00-overview.md:124, 08-deployment-optimization.md:6, 08-deployment-optimization.md:44
 - **architecture** → 00-overview.md:20
+- **ark** → 06-quantization-hardware.md:330
 - **async-load** → 02-scheduling-kv-cache.md:301
 - **async-scheduler** → 02-scheduling-kv-cache.md:45
 - **async-scheduling** → 08-deployment-optimization.md:311
@@ -43,9 +45,12 @@
 - **backend** → 03-model-execution.md:181, 04-attention-kernels.md:8, 04-attention-kernels.md:88, 04-attention-kernels.md:101, 04-attention-kernels.md:208, 04-attention-kernels.md:224
 - **backend-enum** → 04-attention-kernels.md:57
 - **backend-selection** → 04-attention-kernels.md:27, 04-attention-kernels.md:30
+- **backpressure** → 02-scheduling-kv-cache.md:338, 07-advanced-features.md:487
 - **baseline** → 00-overview.md:205
 - **batch-descriptor** → 03-model-execution.md:224
+- **batch-invariance** → 08-deployment-optimization.md:537
 - **batchdescriptor** → 03-model-execution.md:64
+- **beam** → 07-advanced-features.md:451
 - **beam-search** → 07-advanced-features.md:175
 - **bench** → 08-deployment-optimization.md:392, 08-deployment-optimization.md:530
 - **benchmark** → 08-deployment-optimization.md:392
@@ -75,7 +80,7 @@
 - **checklist** → 08-deployment-optimization.md:429
 - **chunked-prefill** → 02-scheduling-kv-cache.md:27, 02-scheduling-kv-cache.md:59, 08-deployment-optimization.md:311
 - **chunked_prefill** → 02-scheduling-kv-cache.md:319
-- **ci** → 08-deployment-optimization.md:530
+- **ci** → 08-deployment-optimization.md:530, 08-deployment-optimization.md:537
 - **classes** → 01-architecture-core.md:80, 01-architecture-core.md:366
 - **cli** → 03-model-execution.md:339, 04-attention-kernels.md:211, 05-distributed.md:423, 07-advanced-features.md:97, 08-deployment-optimization.md:376
 - **client** → 01-architecture-core.md:96, 01-architecture-core.md:382
@@ -87,15 +92,17 @@
 - **compilation-config** → 03-model-execution.md:339, 03-model-execution.md:346
 - **compilation-mode** → 03-model-execution.md:173
 - **compile** → 03-model-execution.md:168, 03-model-execution.md:181, 03-model-execution.md:276, 03-model-execution.md:336, 08-deployment-optimization.md:301
-- **compile-cache** → 03-model-execution.md:195, 08-deployment-optimization.md:178
+- **compile-cache** → 03-model-execution.md:195, 05-distributed.md:553, 08-deployment-optimization.md:178
+- **concurrent-spawn** → 01-architecture-core.md:584
 - **config** → 00-overview.md:88, 01-architecture-core.md:177, 01-architecture-core.md:209, 01-architecture-core.md:218, 01-architecture-core.md:463, 01-architecture-core.md:495, 01-architecture-core.md:504, 04-attention-kernels.md:208
 - **config-hooks** → 06-quantization-hardware.md:142
 - **connector** → 05-distributed.md:273, 05-distributed.md:293, 05-distributed.md:384
 - **consumer-gpu** → 06-quantization-hardware.md:222
 - **context-parallel** → 05-distributed.md:94
 - **continuous-batching** → 02-scheduling-kv-cache.md:30, 08-deployment-optimization.md:311
-- **coordinator** → 02-scheduling-kv-cache.md:103
+- **coordinator** → 01-architecture-core.md:579, 02-scheduling-kv-cache.md:103, 05-distributed.md:553
 - **cpu** → 02-scheduling-kv-cache.md:204, 02-scheduling-kv-cache.md:217, 05-distributed.md:215, 06-quantization-hardware.md:139, 06-quantization-hardware.md:166
+- **cpu-moe** → 06-quantization-hardware.md:330
 - **cpu-offload** → 02-scheduling-kv-cache.md:199
 - **cpugpu-buffer** → 03-model-execution.md:64
 - **crate** → 01-architecture-core.md:70, 01-architecture-core.md:356
@@ -113,39 +120,46 @@
 - **cumem** → 08-deployment-optimization.md:518
 - **current-platform** → 06-quantization-hardware.md:158
 - **custom-allreduce** → 05-distributed.md:173, 05-distributed.md:178, 05-distributed.md:199
+- **cute-dsl** → 04-attention-kernels.md:339
 - **cutlass** → 04-attention-kernels.md:101
 - **dag** → 05-distributed.md:251
 - **data-parallel** → 05-distributed.md:66
 - **dataclass** → 01-architecture-core.md:180, 01-architecture-core.md:466
 - **dataflow** → 00-overview.md:20, 00-overview.md:23, 01-architecture-core.md:110, 01-architecture-core.md:396
-- **dcp** → 03-model-execution.md:395, 04-attention-kernels.md:137, 05-distributed.md:94, 05-distributed.md:539
+- **dbo** → 03-model-execution.md:415
+- **dcp** → 03-model-execution.md:395, 04-attention-kernels.md:137, 04-attention-kernels.md:339, 05-distributed.md:94, 05-distributed.md:539
 - **decision-tree** → 08-deployment-optimization.md:429
 - **decode** → 03-model-execution.md:241, 04-attention-kernels.md:70
 - **decode-only** → 03-model-execution.md:205
 - **decode-priority** → 08-deployment-optimization.md:311
+- **deepgemm** → 06-quantization-hardware.md:319
 - **deepseek_v4** → 03-model-execution.md:385
 - **defer-free** → 02-scheduling-kv-cache.md:78
 - **deployment** → 00-overview.md:149, 03-model-execution.md:368, 06-quantization-hardware.md:222, 07-advanced-features.md:401, 08-deployment-optimization.md:6
+- **derender** → 08-deployment-optimization.md:543
 - **device-communicators** → 05-distributed.md:215
 - **device-id** → 06-quantization-hardware.md:142
-- **dflash** → 07-advanced-features.md:10
+- **dflash** → 07-advanced-features.md:10, 07-advanced-features.md:459
 - **disk** → 02-scheduling-kv-cache.md:217
 - **dispatch** → 03-model-execution.md:224, 05-distributed.md:188
 - **distributed** → 00-overview.md:65, 05-distributed.md:9
 - **docker** → 00-overview.md:107, 00-overview.md:137, 08-deployment-optimization.md:6, 08-deployment-optimization.md:78
-- **dp** → 05-distributed.md:30, 05-distributed.md:66, 05-distributed.md:446, 05-distributed.md:546, 08-deployment-optimization.md:104, 08-deployment-optimization.md:159, 08-deployment-optimization.md:275, 08-deployment-optimization.md:284
+- **dory** → 03-model-execution.md:415, 07-advanced-features.md:487
+- **dp** → 01-architecture-core.md:579, 05-distributed.md:30, 05-distributed.md:66, 05-distributed.md:446, 05-distributed.md:546, 05-distributed.md:553, 08-deployment-optimization.md:104, 08-deployment-optimization.md:159, 08-deployment-optimization.md:275, 08-deployment-optimization.md:284
 - **dp-enginecore** → 01-architecture-core.md:83, 01-architecture-core.md:369
 - **dp-ep** → 05-distributed.md:100
 - **draft** → 07-advanced-features.md:13, 07-advanced-features.md:41
 - **draft-model** → 07-advanced-features.md:10
 - **draft-sampling** → 07-advanced-features.md:72
 - **draft-tokens** → 07-advanced-features.md:131
+- **dspark** → 04-attention-kernels.md:329
 - **dummy** → 03-model-execution.md:76
 - **eager** → 03-model-execution.md:173
-- **eagle** → 07-advanced-features.md:10, 07-advanced-features.md:41
+- **eagle** → 07-advanced-features.md:10, 07-advanced-features.md:41, 07-advanced-features.md:459
 - **eagle3** → 07-advanced-features.md:422
 - **ec-transfer** → 05-distributed.md:381, 05-distributed.md:384
 - **elastic** → 05-distributed.md:100, 05-distributed.md:167, 05-distributed.md:363
+- **elastic-ep** → 01-architecture-core.md:579, 05-distributed.md:553
 - **embedding** → 07-advanced-features.md:327
 - **embeds** → 07-advanced-features.md:274
 - **encoder** → 07-advanced-features.md:256
@@ -178,15 +192,18 @@
 - **fcfs** → 02-scheduling-kv-cache.md:45
 - **files** → 00-overview.md:181, 01-architecture-core.md:247, 01-architecture-core.md:533, 02-scheduling-kv-cache.md:276, 03-model-execution.md:308, 04-attention-kernels.md:265, 05-distributed.md:476, 06-quantization-hardware.md:265, 07-advanced-features.md:342, 08-deployment-optimization.md:476
 - **fingerprint** → 03-model-execution.md:287
+- **first_req** → 05-distributed.md:553
 - **flags** → 01-architecture-core.md:283, 01-architecture-core.md:569, 02-scheduling-kv-cache.md:236, 03-model-execution.md:339, 04-attention-kernels.md:211, 05-distributed.md:420, 05-distributed.md:423, 06-quantization-hardware.md:239, 08-deployment-optimization.md:376
 - **flash-attn** → 04-attention-kernels.md:88, 04-attention-kernels.md:130
 - **flashattention** → 04-attention-kernels.md:85
-- **flashinfer** → 04-attention-kernels.md:85, 04-attention-kernels.md:88, 04-attention-kernels.md:242, 04-attention-kernels.md:309, 04-attention-kernels.md:320, 06-quantization-hardware.md:291
+- **flashinfer** → 04-attention-kernels.md:85, 04-attention-kernels.md:88, 04-attention-kernels.md:242, 04-attention-kernels.md:309, 04-attention-kernels.md:320, 04-attention-kernels.md:339, 06-quantization-hardware.md:291
 - **flashmla** → 04-attention-kernels.md:101
 - **flex-attention** → 04-attention-kernels.md:85
+- **fly** → 07-advanced-features.md:459
 - **forward** → 03-model-execution.md:130
 - **forward-context** → 03-model-execution.md:41
-- **fp8** → 06-quantization-hardware.md:13, 06-quantization-hardware.md:42
+- **fp4** → 06-quantization-hardware.md:319
+- **fp8** → 06-quantization-hardware.md:13, 06-quantization-hardware.md:42, 06-quantization-hardware.md:319
 - **fp8_ds_mla** → 04-attention-kernels.md:315
 - **free-queue** → 02-scheduling-kv-cache.md:87
 - **free_queue** → 02-scheduling-kv-cache.md:319
@@ -194,10 +211,13 @@
 - **fsm** → 07-advanced-features.md:190
 - **full** → 03-model-execution.md:205
 - **fused-moe** → 04-attention-kernels.md:154
+- **fusion** → 06-quantization-hardware.md:319
 - **gather** → 04-attention-kernels.md:147
+- **gemma4** → 03-model-execution.md:415, 07-advanced-features.md:487
 - **generate** → 00-overview.md:110, 08-deployment-optimization.md:21
 - **get-config** → 06-quantization-hardware.md:16
 - **glm** → 04-attention-kernels.md:320
+- **glm-5.3** → 04-attention-kernels.md:339
 - **glm5.3** → 04-attention-kernels.md:298
 - **glm53** → 03-model-execution.md:395
 - **gptq** → 04-attention-kernels.md:162, 06-quantization-hardware.md:13, 06-quantization-hardware.md:42
@@ -205,6 +225,7 @@
 - **gpu-model-runner** → 03-model-execution.md:17
 - **grammar** → 07-advanced-features.md:131
 - **groupcoordinator** → 05-distributed.md:145
+- **grouping** → 02-scheduling-kv-cache.md:328
 - **grpc** → 08-deployment-optimization.md:508
 - **guided-decoding** → 07-advanced-features.md:187
 - **gumbel** → 07-advanced-features.md:310, 07-advanced-features.md:313
@@ -233,30 +254,32 @@
 - **ipc-host** → 00-overview.md:137, 08-deployment-optimization.md:78
 - **json-logging** → 08-deployment-optimization.md:508
 - **json-schema** → 07-advanced-features.md:187
-- **kda** → 04-attention-kernels.md:298
+- **kda** → 04-attention-kernels.md:298, 04-attention-kernels.md:329
 - **kernel-selection** → 06-quantization-hardware.md:125
 - **kernel-warmup** → 03-model-execution.md:276
 - **kernels** → 04-attention-kernels.md:125, 04-attention-kernels.md:137, 04-attention-kernels.md:147, 04-attention-kernels.md:154, 04-attention-kernels.md:162, 04-attention-kernels.md:173, 04-attention-kernels.md:186
 - **key** → 07-advanced-features.md:203
 - **kimi** → 03-model-execution.md:395
+- **kimi-k3** → 03-model-execution.md:409
 - **knobs** → 01-architecture-core.md:283, 01-architecture-core.md:569, 02-scheduling-kv-cache.md:236, 03-model-execution.md:336, 05-distributed.md:420, 06-quantization-hardware.md:239
 - **kpool** → 03-model-execution.md:395
 - **kv-cache** → 02-scheduling-kv-cache.md:84, 02-scheduling-kv-cache.md:146, 02-scheduling-kv-cache.md:163, 04-attention-kernels.md:147, 08-deployment-optimization.md:263
 - **kv-cache-block** → 02-scheduling-kv-cache.md:87
-- **kv-cache-dtype** → 04-attention-kernels.md:256
+- **kv-cache-dtype** → 02-scheduling-kv-cache.md:338, 04-attention-kernels.md:256
 - **kv-cache-layout** → 02-scheduling-kv-cache.md:181
 - **kv-cache-update** → 03-model-execution.md:130
-- **kv-connector** → 02-scheduling-kv-cache.md:301, 05-distributed.md:281, 05-distributed.md:304
+- **kv-connector** → 02-scheduling-kv-cache.md:301, 05-distributed.md:281, 05-distributed.md:304, 05-distributed.md:562
 - **kv-dtype** → 04-attention-kernels.md:224
 - **kv-events** → 05-distributed.md:404
 - **kv-layout** → 04-attention-kernels.md:242
-- **kv-offload** → 02-scheduling-kv-cache.md:199, 02-scheduling-kv-cache.md:204
+- **kv-offload** → 02-scheduling-kv-cache.md:199, 02-scheduling-kv-cache.md:204, 02-scheduling-kv-cache.md:338, 07-advanced-features.md:487
 - **kv-role** → 05-distributed.md:281
 - **kv-split** → 05-distributed.md:94
 - **kv-transfer** → 05-distributed.md:270, 05-distributed.md:273
 - **kv-transfer-config** → 05-distributed.md:281
 - **kv-write** → 04-attention-kernels.md:137
-- **kv_cache** → 02-scheduling-kv-cache.md:319, 04-attention-kernels.md:315, 04-attention-kernels.md:320
+- **kv_cache** → 02-scheduling-kv-cache.md:319, 02-scheduling-kv-cache.md:328, 04-attention-kernels.md:315, 04-attention-kernels.md:320
+- **kv_cache_config_builder** → 02-scheduling-kv-cache.md:328
 - **kv_offload** → 02-scheduling-kv-cache.md:311, 05-distributed.md:546
 - **kvcachemanager** → 02-scheduling-kv-cache.md:103
 - **kvcr** → 05-distributed.md:546
@@ -266,6 +289,7 @@
 - **layout** → 02-scheduling-kv-cache.md:181
 - **lb** → 05-distributed.md:66
 - **lbnhc** → 02-scheduling-kv-cache.md:181
+- **lf-enforcer** → 08-deployment-optimization.md:543
 - **lifecycle** → 01-architecture-core.md:110, 01-architecture-core.md:396
 - **limit-mm** → 07-advanced-features.md:274
 - **linear** → 03-model-execution.md:125, 03-model-execution.md:141
@@ -281,10 +305,11 @@
 - **logical-expert** → 05-distributed.md:338
 - **logits-processor** → 07-advanced-features.md:157
 - **lookup-buffer** → 05-distributed.md:273
-- **lora** → 03-model-execution.md:385, 03-model-execution.md:395, 07-advanced-features.md:224, 07-advanced-features.md:227, 07-advanced-features.md:236
+- **lora** → 03-model-execution.md:385, 03-model-execution.md:395, 03-model-execution.md:409, 06-quantization-hardware.md:319, 07-advanced-features.md:224, 07-advanced-features.md:227, 07-advanced-features.md:236
 - **lru** → 02-scheduling-kv-cache.md:87, 05-distributed.md:408
 - **lru-eviction** → 02-scheduling-kv-cache.md:134
 - **mamba** → 02-scheduling-kv-cache.md:163, 02-scheduling-kv-cache.md:319, 03-model-execution.md:385, 04-attention-kernels.md:57
+- **mamba2** → 04-attention-kernels.md:329
 - **manager** → 07-advanced-features.md:290
 - **map** → 00-overview.md:20
 - **marlin** → 04-attention-kernels.md:162, 06-quantization-hardware.md:311
@@ -298,7 +323,8 @@
 - **message-queue** → 05-distributed.md:215
 - **method** → 07-advanced-features.md:41
 - **metrics** → 07-advanced-features.md:136, 08-deployment-optimization.md:325
-- **mla** → 04-attention-kernels.md:85, 04-attention-kernels.md:101, 04-attention-kernels.md:137, 04-attention-kernels.md:298, 04-attention-kernels.md:315
+- **minimax-m2** → 07-advanced-features.md:451
+- **mla** → 04-attention-kernels.md:85, 04-attention-kernels.md:101, 04-attention-kernels.md:137, 04-attention-kernels.md:298, 04-attention-kernels.md:315, 04-attention-kernels.md:329, 04-attention-kernels.md:339
 - **mla-prefill** → 04-attention-kernels.md:224
 - **mm_normalization** → 03-model-execution.md:395
 - **mmap** → 05-distributed.md:408
@@ -309,31 +335,34 @@
 - **modelconfig** → 01-architecture-core.md:218, 01-architecture-core.md:504
 - **modelrunner** → 03-model-execution.md:17
 - **models** → 03-model-execution.md:402
-- **moe** → 03-model-execution.md:154, 03-model-execution.md:385, 04-attention-kernels.md:154, 05-distributed.md:78, 05-distributed.md:333, 05-distributed.md:363, 05-distributed.md:408, 05-distributed.md:464, 06-quantization-hardware.md:291
+- **moe** → 03-model-execution.md:154, 03-model-execution.md:385, 04-attention-kernels.md:154, 05-distributed.md:78, 05-distributed.md:333, 05-distributed.md:363, 05-distributed.md:408, 05-distributed.md:464, 06-quantization-hardware.md:291, 06-quantization-hardware.md:319
 - **moe-kernel** → 04-attention-kernels.md:125
-- **mooncake** → 02-scheduling-kv-cache.md:301, 05-distributed.md:270, 05-distributed.md:293
-- **mrv2** → 03-model-execution.md:17, 03-model-execution.md:402
+- **mooncake** → 02-scheduling-kv-cache.md:301, 05-distributed.md:270, 05-distributed.md:293, 05-distributed.md:562
+- **mrv2** → 03-model-execution.md:17, 03-model-execution.md:402, 03-model-execution.md:415
 - **msgpack** → 01-architecture-core.md:62, 01-architecture-core.md:348
-- **mtp** → 03-model-execution.md:376, 03-model-execution.md:402, 07-advanced-features.md:10, 07-advanced-features.md:41, 07-advanced-features.md:422
+- **mtp** → 03-model-execution.md:376, 03-model-execution.md:402, 07-advanced-features.md:10, 07-advanced-features.md:41, 07-advanced-features.md:422, 08-deployment-optimization.md:537
 - **multi-node** → 08-deployment-optimization.md:104
 - **multimodal** → 07-advanced-features.md:253, 07-advanced-features.md:256, 07-advanced-features.md:274
-- **multiproc** → 05-distributed.md:226, 08-deployment-optimization.md:159
+- **multiproc** → 01-architecture-core.md:584, 05-distributed.md:226, 08-deployment-optimization.md:159
 - **multiproc-executor** → 05-distributed.md:241
 - **multiprocess** → 01-architecture-core.md:26, 01-architecture-core.md:312
 - **mxfp4** → 04-attention-kernels.md:298, 06-quantization-hardware.md:291, 06-quantization-hardware.md:311
-- **mxfp8** → 06-quantization-hardware.md:13
+- **mxfp8** → 06-quantization-hardware.md:13, 06-quantization-hardware.md:330
 - **n-gram** → 07-advanced-features.md:310, 07-advanced-features.md:327
 - **native** → 02-scheduling-kv-cache.md:204
 - **navigation** → 00-overview.md:93
 - **nccl** → 05-distributed.md:173, 05-distributed.md:209, 05-distributed.md:397, 05-distributed.md:446
 - **nccl_graph_register** → 08-deployment-optimization.md:518
-- **ngram** → 03-model-execution.md:402, 07-advanced-features.md:10, 07-advanced-features.md:41
+- **new-models** → 03-model-execution.md:415
+- **ngram** → 03-model-execution.md:402, 07-advanced-features.md:10, 07-advanced-features.md:41, 08-deployment-optimization.md:537
 - **nhd** → 02-scheduling-kv-cache.md:181
-- **nixl** → 02-scheduling-kv-cache.md:301, 02-scheduling-kv-cache.md:311, 05-distributed.md:270, 05-distributed.md:293, 05-distributed.md:446, 05-distributed.md:546
+- **nixl** → 02-scheduling-kv-cache.md:301, 02-scheduling-kv-cache.md:311, 05-distributed.md:270, 05-distributed.md:293, 05-distributed.md:446, 05-distributed.md:546, 05-distributed.md:562
+- **nixl-telemetry** → 07-advanced-features.md:487
 - **nonroot** → 00-overview.md:137, 08-deployment-optimization.md:78
 - **nope512** → 04-attention-kernels.md:315
 - **num-computed-tokens** → 02-scheduling-kv-cache.md:30
 - **num-gpu-blocks** → 02-scheduling-kv-cache.md:146
+- **num_stages** → 03-model-execution.md:409
 - **numa** → 05-distributed.md:261
 - **nvfp4** → 04-attention-kernels.md:298, 04-attention-kernels.md:320, 06-quantization-hardware.md:13, 06-quantization-hardware.md:291, 06-quantization-hardware.md:311
 - **nvidia** → 06-quantization-hardware.md:139
@@ -359,10 +388,10 @@
 - **parallel-config** → 05-distributed.md:423
 - **parallel-state** → 05-distributed.md:109
 - **parallelism** → 05-distributed.md:30
-- **parser** → 07-advanced-features.md:290, 07-advanced-features.md:298
+- **parser** → 07-advanced-features.md:290, 07-advanced-features.md:298, 07-advanced-features.md:451
 - **pass-config** → 03-model-execution.md:346
 - **pause** → 02-scheduling-kv-cache.md:319
-- **pcp** → 05-distributed.md:94, 05-distributed.md:530
+- **pcp** → 03-model-execution.md:415, 05-distributed.md:94, 05-distributed.md:530
 - **pd-disaggregation** → 05-distributed.md:270, 08-deployment-optimization.md:104
 - **per-request** → 07-advanced-features.md:136
 - **philox** → 07-advanced-features.md:310, 07-advanced-features.md:313
@@ -372,8 +401,10 @@
 - **pipe** → 05-distributed.md:273
 - **pipeline-parallel** → 05-distributed.md:59
 - **placement-group** → 05-distributed.md:251
-- **platform** → 06-quantization-hardware.md:139, 06-quantization-hardware.md:142, 06-quantization-hardware.md:158, 06-quantization-hardware.md:166
+- **platform** → 02-scheduling-kv-cache.md:328, 06-quantization-hardware.md:139, 06-quantization-hardware.md:142, 06-quantization-hardware.md:158, 06-quantization-hardware.md:166
 - **ple** → 07-advanced-features.md:327
+- **pluggable** → 02-scheduling-kv-cache.md:328, 02-scheduling-kv-cache.md:338
+- **png** → 06-quantization-hardware.md:319
 - **policy** → 02-scheduling-kv-cache.md:27, 05-distributed.md:345
 - **post-init** → 01-architecture-core.md:209, 01-architecture-core.md:495
 - **pp** → 05-distributed.md:30, 05-distributed.md:59, 08-deployment-optimization.md:284
@@ -389,10 +420,12 @@
 - **process-weights** → 03-model-execution.md:89
 - **processor** → 07-advanced-features.md:256
 - **profile** → 08-deployment-optimization.md:360
+- **profile-prefix** → 08-deployment-optimization.md:543
 - **profile-run** → 03-model-execution.md:263
 - **profiling** → 07-advanced-features.md:443, 08-deployment-optimization.md:360
 - **prompt_logprob_token_ids** → 07-advanced-features.md:434
 - **proton** → 08-deployment-optimization.md:360
+- **ptxas** → 03-model-execution.md:409
 - **punica** → 07-advanced-features.md:227
 - **pynccl** → 05-distributed.md:178
 - **python310** → 06-quantization-hardware.md:311
@@ -401,15 +434,16 @@
 - **quant-method** → 03-model-execution.md:110
 - **quantization** → 00-overview.md:65, 03-model-execution.md:110, 03-model-execution.md:115, 04-attention-kernels.md:162, 06-quantization-hardware.md:13, 06-quantization-hardware.md:42, 06-quantization-hardware.md:125, 06-quantization-hardware.md:239
 - **quantization-methods** → 06-quantization-hardware.md:16
+- **quark** → 06-quantization-hardware.md:330
 - **queues** → 02-scheduling-kv-cache.md:45
 - **quickstart** → 00-overview.md:107
 - **qwen4exp** → 03-model-execution.md:385
 - **rank** → 05-distributed.md:109, 05-distributed.md:112, 05-distributed.md:122
-- **ray** → 05-distributed.md:226, 05-distributed.md:251, 08-deployment-optimization.md:104
+- **ray** → 05-distributed.md:226, 05-distributed.md:251, 05-distributed.md:553, 08-deployment-optimization.md:104
 - **ray-actor** → 01-architecture-core.md:83, 01-architecture-core.md:369
 - **ray-executor** → 05-distributed.md:251
 - **rdna3** → 06-quantization-hardware.md:303
-- **reasoning** → 07-advanced-features.md:208, 07-advanced-features.md:214, 07-advanced-features.md:287, 07-advanced-features.md:290, 07-advanced-features.md:298
+- **reasoning** → 07-advanced-features.md:208, 07-advanced-features.md:214, 07-advanced-features.md:287, 07-advanced-features.md:290, 07-advanced-features.md:298, 07-advanced-features.md:451
 - **reasoning-parser** → 07-advanced-features.md:287
 - **recompute** → 02-scheduling-kv-cache.md:67, 08-deployment-optimization.md:325
 - **redundant** → 05-distributed.md:338
@@ -421,21 +455,24 @@
 - **request** → 00-overview.md:23, 01-architecture-core.md:110, 01-architecture-core.md:396, 07-advanced-features.md:203
 - **reshape** → 05-distributed.md:122
 - **reshape-and-cache** → 04-attention-kernels.md:147
+- **response-template** → 07-advanced-features.md:451
 - **responses_api** → 07-advanced-features.md:434
 - **rlhf** → 05-distributed.md:397
-- **rmsnorm** → 03-model-execution.md:154
+- **rmsnorm** → 03-model-execution.md:154, 06-quantization-hardware.md:319
 - **rng** → 08-deployment-optimization.md:530
-- **rocm** → 04-attention-kernels.md:242, 06-quantization-hardware.md:139, 06-quantization-hardware.md:166, 06-quantization-hardware.md:291, 06-quantization-hardware.md:303, 06-quantization-hardware.md:311
+- **rocm** → 04-attention-kernels.md:242, 04-attention-kernels.md:329, 06-quantization-hardware.md:139, 06-quantization-hardware.md:166, 06-quantization-hardware.md:291, 06-quantization-hardware.md:303, 06-quantization-hardware.md:311, 06-quantization-hardware.md:319, 06-quantization-hardware.md:330, 08-deployment-optimization.md:537
+- **rocm-perf** → 06-quantization-hardware.md:330
 - **rope** → 04-attention-kernels.md:173
 - **rotary** → 03-model-execution.md:154
 - **routed-experts** → 05-distributed.md:408
 - **router** → 04-attention-kernels.md:154
+- **router-gemm** → 06-quantization-hardware.md:319
 - **row-parallel** → 03-model-execution.md:99, 03-model-execution.md:141
 - **rust** → 07-advanced-features.md:443, 08-deployment-optimization.md:508
-- **rust-frontend** → 01-architecture-core.md:70, 01-architecture-core.md:356, 08-deployment-optimization.md:44
+- **rust-frontend** → 01-architecture-core.md:70, 01-architecture-core.md:356, 08-deployment-optimization.md:44, 08-deployment-optimization.md:543
 - **safetensors** → 03-model-execution.md:76
 - **sampler** → 04-attention-kernels.md:173, 07-advanced-features.md:154, 07-advanced-features.md:157
-- **sampling** → 03-model-execution.md:299, 07-advanced-features.md:154
+- **sampling** → 03-model-execution.md:299, 07-advanced-features.md:154, 07-advanced-features.md:459
 - **sampling-mask** → 07-advanced-features.md:422
 - **sampling-params** → 07-advanced-features.md:154, 07-advanced-features.md:175
 - **scheduler** → 02-scheduling-kv-cache.md:6, 02-scheduling-kv-cache.md:30, 02-scheduling-kv-cache.md:45, 07-advanced-features.md:131
@@ -449,20 +486,23 @@
 - **sharded** → 03-model-execution.md:71
 - **sharded-rdt** → 05-distributed.md:397
 - **shm** → 05-distributed.md:215
+- **shm-broadcast** → 05-distributed.md:562
+- **shutdown** → 01-architecture-core.md:584
 - **simple-kv-offload** → 02-scheduling-kv-cache.md:217
 - **simple_cpu** → 02-scheduling-kv-cache.md:311
 - **single-type** → 02-scheduling-kv-cache.md:103
 - **sleep** → 03-model-execution.md:376
-- **sleep-mode** → 00-overview.md:110, 08-deployment-optimization.md:21
+- **sleep-mode** → 00-overview.md:110, 05-distributed.md:562, 08-deployment-optimization.md:21
+- **sleep-mode-backend** → 08-deployment-optimization.md:543
 - **sleep_mode** → 08-deployment-optimization.md:518
 - **sliding-window** → 02-scheduling-kv-cache.md:163
 - **sm** → 04-attention-kernels.md:27
-- **sm100** → 04-attention-kernels.md:30
+- **sm100** → 04-attention-kernels.md:30, 06-quantization-hardware.md:319
 - **sm120** → 04-attention-kernels.md:27
-- **sm90** → 04-attention-kernels.md:315
+- **sm90** → 03-model-execution.md:409, 04-attention-kernels.md:315, 06-quantization-hardware.md:319
 - **sparse-mla** → 02-scheduling-kv-cache.md:227
 - **spec** → 02-scheduling-kv-cache.md:163
-- **spec-decode** → 03-model-execution.md:216, 07-advanced-features.md:422
+- **spec-decode** → 03-model-execution.md:216, 07-advanced-features.md:422, 07-advanced-features.md:459, 08-deployment-optimization.md:537
 - **spec-rollback** → 02-scheduling-kv-cache.md:78
 - **spec-tokens** → 07-advanced-features.md:131
 - **spec_decode** → 03-model-execution.md:402
@@ -472,13 +512,17 @@
 - **split-k** → 04-attention-kernels.md:298
 - **splitting-ops** → 03-model-execution.md:346
 - **standalone-compile** → 03-model-execution.md:360
+- **startup** → 01-architecture-core.md:584
 - **startup-plan** → 03-model-execution.md:287
 - **stateless** → 05-distributed.md:167
 - **step** → 01-architecture-core.md:83, 01-architecture-core.md:369, 03-model-execution.md:17, 03-model-execution.md:41
+- **step5** → 03-model-execution.md:415
 - **store** → 05-distributed.md:167
+- **streaming** → 07-advanced-features.md:451
 - **stride** → 02-scheduling-kv-cache.md:181
 - **structured-output** → 07-advanced-features.md:187, 07-advanced-features.md:190, 07-advanced-features.md:203, 07-advanced-features.md:208, 07-advanced-features.md:214, 07-advanced-features.md:422
 - **structured_output** → 07-advanced-features.md:443
+- **swa** → 02-scheduling-kv-cache.md:338
 - **swap** → 04-attention-kernels.md:147
 - **symm-mem** → 05-distributed.md:178, 05-distributed.md:209
 - **syncmp** → 01-architecture-core.md:96, 01-architecture-core.md:382
@@ -491,9 +535,10 @@
 - **threads** → 01-architecture-core.md:52, 01-architecture-core.md:338
 - **throttle** → 02-scheduling-kv-cache.md:59
 - **throughput** → 08-deployment-optimization.md:236, 08-deployment-optimization.md:239
-- **tiering** → 02-scheduling-kv-cache.md:204
+- **tiering** → 02-scheduling-kv-cache.md:204, 02-scheduling-kv-cache.md:338
 - **token-model** → 02-scheduling-kv-cache.md:30
 - **tokenspeed_mla** → 05-distributed.md:539
+- **tool-call** → 07-advanced-features.md:451
 - **tool_parser** → 07-advanced-features.md:443
 - **topk-topp** → 07-advanced-features.md:157
 - **torch-compile** → 03-model-execution.md:168
@@ -501,25 +546,31 @@
 - **tp** → 03-model-execution.md:99, 03-model-execution.md:141, 05-distributed.md:30, 05-distributed.md:52, 08-deployment-optimization.md:284
 - **tp-pp** → 05-distributed.md:100
 - **transformers-backend** → 03-model-execution.md:376
-- **triton** → 04-attention-kernels.md:85, 04-attention-kernels.md:88, 04-attention-kernels.md:154, 04-attention-kernels.md:186
+- **triton** → 03-model-execution.md:409, 04-attention-kernels.md:85, 04-attention-kernels.md:88, 04-attention-kernels.md:154, 04-attention-kernels.md:186
+- **trtllm-gen** → 04-attention-kernels.md:339
 - **tuning** → 00-overview.md:149, 01-architecture-core.md:283, 01-architecture-core.md:569, 02-scheduling-kv-cache.md:236, 03-model-execution.md:336, 05-distributed.md:420, 05-distributed.md:464, 06-quantization-hardware.md:239, 07-advanced-features.md:401, 08-deployment-optimization.md:236
 - **ubatch** → 03-model-execution.md:249
 - **ultraquant** → 04-attention-kernels.md:320
+- **umbp** → 05-distributed.md:562
 - **update-from-output** → 02-scheduling-kv-cache.md:78
 - **v1** → 01-architecture-core.md:8, 01-architecture-core.md:294
+- **varlen** → 04-attention-kernels.md:329
 - **verify** → 07-advanced-features.md:13
 - **vision** → 03-model-execution.md:292, 07-advanced-features.md:253
 - **vllm-compile** → 03-model-execution.md:173
 - **vllm-envs** → 08-deployment-optimization.md:154
 - **vllmconfig** → 00-overview.md:88, 01-architecture-core.md:177, 01-architecture-core.md:180, 01-architecture-core.md:463, 01-architecture-core.md:466
 - **vlm** → 07-advanced-features.md:253
-- **w4a16** → 06-quantization-hardware.md:13, 06-quantization-hardware.md:303
+- **w4a16** → 06-quantization-hardware.md:13, 06-quantization-hardware.md:303, 06-quantization-hardware.md:330
+- **w4a8** → 06-quantization-hardware.md:330
 - **w8a8** → 06-quantization-hardware.md:13, 06-quantization-hardware.md:118
-- **warmup** → 03-model-execution.md:241, 03-model-execution.md:258, 03-model-execution.md:276
+- **warmup** → 03-model-execution.md:241, 03-model-execution.md:258, 03-model-execution.md:276, 03-model-execution.md:409
+- **watchdog** → 01-architecture-core.md:584, 08-deployment-optimization.md:543
 - **watermark** → 02-scheduling-kv-cache.md:59, 08-deployment-optimization.md:530
 - **watermarking** → 07-advanced-features.md:310, 07-advanced-features.md:313
+- **wave** → 01-architecture-core.md:579, 05-distributed.md:553
 - **weight-loader** → 03-model-execution.md:99
-- **weight-transfer** → 05-distributed.md:381, 05-distributed.md:397, 05-distributed.md:530
+- **weight-transfer** → 05-distributed.md:381, 05-distributed.md:397, 05-distributed.md:530, 05-distributed.md:562
 - **weights** → 03-model-execution.md:71, 03-model-execution.md:89
 - **wna16** → 06-quantization-hardware.md:118
 - **worker** → 00-overview.md:23, 05-distributed.md:226, 05-distributed.md:241, 05-distributed.md:261
@@ -533,6 +584,7 @@
 - **wrapper** → 03-model-execution.md:249
 - **xgrammar** → 07-advanced-features.md:187, 07-advanced-features.md:190, 07-advanced-features.md:443
 - **xgrammar-cache** → 07-advanced-features.md:214
+- **xpress** → 07-advanced-features.md:459
 - **xpu** → 05-distributed.md:215, 06-quantization-hardware.md:166, 06-quantization-hardware.md:291, 06-quantization-hardware.md:311
 - **zeroing** → 02-scheduling-kv-cache.md:301
 - **zmq** → 00-overview.md:23, 01-architecture-core.md:26, 01-architecture-core.md:52, 01-architecture-core.md:62, 01-architecture-core.md:70, 01-architecture-core.md:312, 01-architecture-core.md:338, 01-architecture-core.md:348, 01-architecture-core.md:356, 05-distributed.md:404
@@ -583,7 +635,7 @@
 - **基类** → 06-quantization-hardware.md:142
 - **基线** → 00-overview.md:205
 - **基线新增** → 02-scheduling-kv-cache.md:301, 03-model-execution.md:376, 04-attention-kernels.md:298, 05-distributed.md:530, 06-quantization-hardware.md:291, 07-advanced-features.md:422, 08-deployment-optimization.md:508
-- **基线更新** → 02-scheduling-kv-cache.md:311, 02-scheduling-kv-cache.md:319, 03-model-execution.md:385, 03-model-execution.md:395, 03-model-execution.md:402, 04-attention-kernels.md:309, 04-attention-kernels.md:315, 04-attention-kernels.md:320, 05-distributed.md:539, 05-distributed.md:546, 06-quantization-hardware.md:303, 06-quantization-hardware.md:311, 07-advanced-features.md:434, 07-advanced-features.md:443, 08-deployment-optimization.md:518, 08-deployment-optimization.md:530
+- **基线更新** → 01-architecture-core.md:579, 01-architecture-core.md:584, 02-scheduling-kv-cache.md:311, 02-scheduling-kv-cache.md:319, 02-scheduling-kv-cache.md:328, 02-scheduling-kv-cache.md:338, 03-model-execution.md:385, 03-model-execution.md:395, 03-model-execution.md:402, 03-model-execution.md:409, 03-model-execution.md:415, 04-attention-kernels.md:309, 04-attention-kernels.md:315, 04-attention-kernels.md:320, 04-attention-kernels.md:329, 04-attention-kernels.md:339, 05-distributed.md:539, 05-distributed.md:546, 05-distributed.md:553, 05-distributed.md:562, 06-quantization-hardware.md:303, 06-quantization-hardware.md:311, 06-quantization-hardware.md:319, 06-quantization-hardware.md:330, 07-advanced-features.md:434, 07-advanced-features.md:443, 07-advanced-features.md:451, 07-advanced-features.md:459, 07-advanced-features.md:487, 08-deployment-optimization.md:518, 08-deployment-optimization.md:530, 08-deployment-optimization.md:537, 08-deployment-optimization.md:543
 - **增量更新** → 00-overview.md:205
 - **处理** → 08-deployment-optimization.md:325
 - **外部索引** → 05-distributed.md:404
